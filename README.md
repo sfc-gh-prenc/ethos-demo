@@ -48,3 +48,25 @@ streamlit run src/ethos_demo/app.py
 ```
 
 The app lets you configure the endpoint URL, model ID, and number of requests from the sidebar, then visualizes per-request latency as a line chart.
+
+## Health check
+
+```bash
+curl http://localhost:8000/v1/models
+```
+
+Or use the built-in Ray Serve health endpoint:
+
+```bash
+curl http://localhost:8000/-/healthz
+```
+
+## Accessing from outside Kubernetes
+
+If the model is deployed in a Kubernetes cluster, use `kubectl port-forward` to tunnel traffic from your laptop:
+
+```bash
+kubectl port-forward pod/<pod-name> 8000:8000 -n <namespace>
+```
+
+Then all local calls to `http://localhost:8000` reach the in-cluster deployment.

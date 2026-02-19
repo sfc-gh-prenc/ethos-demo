@@ -5,7 +5,7 @@ import time
 import polars as pl
 import streamlit as st
 
-from .client import DEFAULT_BASE_URL, DEFAULT_MODEL, send_completion_request
+from ethos_demo.client import DEFAULT_BASE_URL, DEFAULT_MODEL, send_completion_request
 
 st.set_page_config(page_title="ETHOS Demo", layout="wide")
 st.title("ETHOS Demo")
