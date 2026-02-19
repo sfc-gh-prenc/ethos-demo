@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ethos_demo"
+version = "0.1.0"
+description = "ETHOS Demo – Streamlit app with vLLM backend via Ray Serve"
+readme = "README.md"
+authors = [
+    { name = "Pawel Renc", email = "pawel.renc@snowflake.com" },
+]
+maintainers = [
+    { name = "Pawel Renc", email = "pawel.renc@snowflake.com" },
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+requires-python = "==3.12.*"
+dependencies = [
+    "hf_transfer",
+    "openai",
+    "polars",
+    "pyyaml",
+    "ray[serve,llm]",
+    "streamlit",
+    "vllm",
+]
+
+[project.optional-dependencies]
+dev = ["pre-commit", "ruff"]
+
+[project.scripts]
+ethos-app = "ethos_demo.app:main"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "DTZ", # flake8-datetimez
+    "RUF", # Ruff-specific rules
+    "SIM", # flake8-simplify
+    "TCH", # flake8-type-checking
+    "N",   # pep8-naming
+]
