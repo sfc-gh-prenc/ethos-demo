@@ -24,9 +24,8 @@ def main():
 
     llm_config = LLMConfig(
         model_loading_config={"model_id": args.model_id, "model_source": str(args.model_path)},
-        deployment_config={"autoscaling_config": {"min_replicas": 1, "max_replicas": 2}},
+        deployment_config={"num_replicas": num_gpus},
         engine_kwargs={
-            "tensor_parallel_size": num_gpus,
             "gpu_memory_utilization": args.gpu_memory_utilization,
         },
     )
