@@ -1,6 +1,7 @@
 """ETHOS Demo - Streamlit application."""
 
 import logging
+import threading
 from datetime import timedelta
 
 import streamlit as st
@@ -191,12 +192,23 @@ if dataset_name and scenario:
         ethos_model = st.session_state.get("ethos_model_id")
         has_model = bool(ethos_model and ethos_model != "Could not fetch models")
 
-        btn_col, prog_col = st.columns([1, 3])
+        btn_col, spinner_col, prog_col = st.columns([1, 0.2, 2.8])
         with btn_col:
-            run_clicked = st.button(
-                "Estimate Outcomes",
-                disabled=estimating or not has_model,
-            )
+            if estimating:
+                cancel_clicked = st.button("Cancel", use_container_width=True)
+            else:
+                cancel_clicked = False
+                run_clicked = st.button(
+                    "Estimate Outcomes",
+                    disabled=not has_model,
+                    use_container_width=True,
+                )
+        with spinner_col:
+            if estimating:
+                st.markdown(
+                    "<div class='health-spinner' style='margin-top:8px'></div>",
+                    unsafe_allow_html=True,
+                )
         with prog_col:
             progress_ph = st.empty()
 
@@ -224,10 +236,18 @@ if dataset_name and scenario:
                         unsafe_allow_html=True,
                     )
 
-        if run_clicked:
+        if not estimating and run_clicked:
             for t in tasks:
                 st.session_state.pop(f"prob_{t}", None)
             st.session_state["_estimating"] = True
+            st.session_state["_cancel_event"] = threading.Event()
+            st.rerun()
+
+        if estimating and cancel_clicked:
+            cancel_ev = st.session_state.get("_cancel_event")
+            if cancel_ev:
+                cancel_ev.set()
+            st.session_state["_estimating"] = False
             st.rerun()
 
         if estimating:
@@ -243,6 +263,7 @@ if dataset_name and scenario:
                 )
 
             patient_id, prediction_time = get_sample_identity(ds, selected_idx)
+            cancel_ev = st.session_state.get("_cancel_event")
             estimator = OutcomeEstimator(
                 dataset_name=dataset_name,
                 patient_id=patient_id,
@@ -254,6 +275,7 @@ if dataset_name and scenario:
                 n_per_request=N_PER_REQUEST,
                 on_progress=_on_progress,
                 on_task_update=_on_task_update,
+                cancel_event=cancel_ev,
             )
             estimator.run()
             progress_ph.empty()

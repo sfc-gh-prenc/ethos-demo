@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -54,6 +55,7 @@ class OutcomeEstimator:
         n_per_request: int = 10,
         on_progress: Callable[[int, int], None] | None = None,
         on_task_update: Callable[[str, float], None] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> None:
         self.dataset_name = dataset_name
         self.patient_id = patient_id
@@ -65,6 +67,8 @@ class OutcomeEstimator:
         self.n_per_request = n_per_request
         self.on_progress = on_progress
         self.on_task_update = on_task_update
+        self.cancel_event = cancel_event
+        self.cancelled = False
 
         self._task_data: dict[str, tuple[InferenceDataset, str, int, list[str]]] = {}
         self.results: dict[str, TaskResult] = {t: TaskResult() for t in tasks}
@@ -90,35 +94,55 @@ class OutcomeEstimator:
         return task_name, batch
 
     async def _run(self) -> None:
-        coros = [self._send_one(t) for t in self.tasks for _ in range(self.n_requests)]
-        total = len(coros)
+        futures = [
+            asyncio.ensure_future(self._send_one(t))
+            for t in self.tasks
+            for _ in range(self.n_requests)
+        ]
+        total = len(futures)
+        pending = set(futures)
+        completed = 0
 
-        for completed, future in enumerate(asyncio.as_completed(coros), 1):
-            task_name, batch = await future
+        while pending:
+            if self.cancel_event and self.cancel_event.is_set():
+                for f in pending:
+                    f.cancel()
+                self.cancelled = True
+                logger.debug("Estimation cancelled — %d/%d completed", completed, total)
+                break
 
-            ds = self._task_data[task_name][0]
-            batch_pos, batch_valid = compute_task_counts(batch, task_name, ds.vocab)
-
-            result = self.results[task_name]
-            result.update(batch_pos, batch_valid)
-
-            logger.debug(
-                "[%s] batch %d/%d — pos=%d valid=%d (cumul pos=%d valid=%d prob=%.2f%%)",
-                task_name,
-                completed,
-                total,
-                batch_pos,
-                batch_valid,
-                result.positives,
-                result.valid,
-                (result.probability or 0) * 100,
+            done, pending = await asyncio.wait(
+                pending,
+                timeout=0.2,
+                return_when=asyncio.FIRST_COMPLETED,
             )
+            for future in done:
+                task_name, batch = future.result()
+                completed += 1
 
-            if self.on_progress:
-                self.on_progress(completed, total)
+                ds = self._task_data[task_name][0]
+                batch_pos, batch_valid = compute_task_counts(batch, task_name, ds.vocab)
 
-            if self.on_task_update and result.probability is not None:
-                self.on_task_update(task_name, result.probability)
+                result = self.results[task_name]
+                result.update(batch_pos, batch_valid)
+
+                logger.debug(
+                    "[%s] batch %d/%d — pos=%d valid=%d (cumul pos=%d valid=%d prob=%.2f%%)",
+                    task_name,
+                    completed,
+                    total,
+                    batch_pos,
+                    batch_valid,
+                    result.positives,
+                    result.valid,
+                    (result.probability or 0) * 100,
+                )
+
+                if self.on_progress:
+                    self.on_progress(completed, total)
+
+                if self.on_task_update and result.probability is not None:
+                    self.on_task_update(task_name, result.probability)
 
     def run(self) -> dict[str, TaskResult]:
         """Prepare data, fire all requests, and return results."""
