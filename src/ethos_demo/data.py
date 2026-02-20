@@ -143,7 +143,7 @@ def build_sample_labels(dataset: InferenceDataset, indices: np.ndarray) -> list[
     """Return (dataset_idx, display_label) pairs for the sampled indices.
 
     The label includes an admission-order suffix only when a patient appears more than once in the
-    sample set.
+    sample set, and always shows the number of events in the history.
     """
     patient_ids = [
         dataset.patient_id_at_idx[dataset.start_indices[int(i)].item()].item() for i in indices
@@ -152,11 +152,13 @@ def build_sample_labels(dataset: InferenceDataset, indices: np.ndarray) -> list[
 
     labels: list[tuple[int, str]] = []
     for i, pid in zip(indices, patient_ids, strict=False):
+        x, _y = dataset[int(i)]
+        n_events = len(x["input_ids"])
         if pid_counts[pid] > 1:
             order = get_admission_order(dataset, int(i))
-            label = f"Patient {pid} — Case #{order}"
+            label = f"Patient {pid} — Case #{order} ({n_events} events)"
         else:
-            label = f"Patient {pid}"
+            label = f"Patient {pid} ({n_events} events)"
         labels.append((int(i), label))
 
     return labels
@@ -175,22 +177,59 @@ def get_sample_prompt(dataset: InferenceDataset, idx: int) -> tuple[str, int, li
 _24H_US = int(timedelta(hours=24) / timedelta(microseconds=1))
 
 
-def get_last_24h_history(dataset: InferenceDataset, idx: int) -> str:
-    """Decode the timeline tokens from the last 24 hours before prediction time."""
+def _timeline_bounds(dataset: InferenceDataset, idx: int) -> tuple[int, int]:
+    """Return (timeline_start, start_idx) for sample *idx*."""
     start_idx = dataset.start_indices[idx].item()
     timeline_start_idx = dataset.patient_offset_at_idx[start_idx].item()
     if start_idx - timeline_start_idx + 1 > dataset.timeline_size:
         timeline_start_idx = start_idx + 1 - dataset.timeline_size
+    return timeline_start_idx, start_idx
 
+
+def _decode_window(dataset: InferenceDataset, lo: int, hi: int) -> str:
+    """Decode tokens in [lo, hi] and join non-None values."""
+    tokens = dataset.vocab.decode(dataset.tokens[lo : hi + 1])
+    return " ".join(t for t in tokens if t is not None)
+
+
+def get_triage_history(dataset: InferenceDataset, idx: int) -> str:
+    """Decode tokens sharing the same timestamp as the prediction time (triage events)."""
+    timeline_start, start_idx = _timeline_bounds(dataset, idx)
+    prediction_time_us = int(dataset.times[start_idx].item())
+
+    times_slice = dataset.times[timeline_start : start_idx + 1]
+    mask = (times_slice == prediction_time_us).nonzero(as_tuple=False)
+    window_start = timeline_start + int(mask[0].item())
+    return _decode_window(dataset, window_start, start_idx)
+
+
+def get_last_24h_history(dataset: InferenceDataset, idx: int) -> str:
+    """Decode the timeline tokens from the last 24 hours before prediction time."""
+    timeline_start, start_idx = _timeline_bounds(dataset, idx)
     prediction_time_us = int(dataset.times[start_idx].item())
     cutoff_us = prediction_time_us - _24H_US
 
-    times_slice = dataset.times[timeline_start_idx : start_idx + 1]
+    times_slice = dataset.times[timeline_start : start_idx + 1]
     first_in_window = int((times_slice >= cutoff_us).nonzero(as_tuple=False)[0].item())
-    window_start = timeline_start_idx + first_in_window
+    window_start = timeline_start + first_in_window
+    return _decode_window(dataset, window_start, start_idx)
 
-    tokens = dataset.vocab.decode(dataset.tokens[window_start : start_idx + 1])
-    return " ".join(t for t in tokens if t is not None)
+
+def get_stay_history(dataset: InferenceDataset, idx: int) -> str:
+    """Decode tokens from the most recent HOSPITAL_ADMISSION to prediction time."""
+    timeline_start, start_idx = _timeline_bounds(dataset, idx)
+    token_ids = dataset.tokens[timeline_start : start_idx + 1]
+    decoded = dataset.vocab.decode(token_ids)
+
+    # Walk backwards to find the most recent admission boundary
+    admission_pos = None
+    for i in range(len(decoded) - 1, -1, -1):
+        if decoded[i] == "HOSPITAL_ADMISSION":
+            admission_pos = i
+            break
+
+    window_start = timeline_start + admission_pos if admission_pos is not None else timeline_start
+    return _decode_window(dataset, window_start, start_idx)
 
 
 def get_sample_context_stats(dataset: InferenceDataset, idx: int) -> dict[str, str]:
@@ -215,12 +254,13 @@ def get_sample_context_stats(dataset: InferenceDataset, idx: int) -> dict[str, s
 
 def _format_timedelta(td: timedelta) -> str:
     total_days = td.days
-    years, remaining = divmod(total_days, 365)
-    months = remaining // 30
+    total_months = round(total_days / 30.44)
+    years, months = divmod(total_months, 12)
     if years > 0:
         return f"{years}y {months}mt" if months else f"{years}y"
     if months > 0:
-        return f"{months}mt {remaining - months * 30}d"
+        days = total_days - round(months * 30.44)
+        return f"{months}mt {days}d" if days > 0 else f"{months}mt"
     return f"{total_days}d"
 
 

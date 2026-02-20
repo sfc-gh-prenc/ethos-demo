@@ -16,9 +16,11 @@ from ethos_demo.config import (
     N_SAMPLES,
     SAMPLE_SEED,
     SCENARIO_CONTEXT,
+    SCENARIO_DESCRIPTION,
     SCENARIO_TASKS,
     TASK_DISPLAY,
     TOKENIZED_DATASETS_DIR,
+    Scenario,
 )
 from ethos_demo.data import (
     build_sample_labels,
@@ -33,9 +35,10 @@ from ethos_demo.summarizer import SummaryGenerator
 
 _logger = logging.getLogger("ethos_demo")
 _logger.setLevel(logging.DEBUG)
-_handler = logging.StreamHandler()
-_handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(message)s"))
-_logger.addHandler(_handler)
+if not _logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(message)s"))
+    _logger.addHandler(_handler)
 _logger.propagate = False
 
 st.set_page_config(page_title="ETHOS Demo", layout="wide")
@@ -49,14 +52,13 @@ with st.sidebar:
         ".status-dot.ok{background:#4caf50}"
         ".status-dot.err{background:#f44336}"
         ".status-text{font-size:0.85em}"
-        ".st-key-health_box [data-testid='stElementContainer']:has(button)"
-        "{height:20px;overflow:hidden;margin-bottom:-4px!important}"
-        ".st-key-health_box button[disabled]{visibility:hidden}"
+        ".st-key-health_box button[disabled]{display:none}"
         ".st-key-health_box button"
         "{padding:0!important;min-height:0!important}"
         "@keyframes _spin{to{transform:rotate(360deg)}}"
         ".st-key-health_loading span[data-testid='stIconMaterial']"
         "{animation:_spin .7s linear infinite}"
+        ".st-key-health_box{position:fixed;bottom:1rem;width:inherit}"
     )
     st.markdown(f"<style>{_SIDEBAR_CSS}</style>", unsafe_allow_html=True)
 
@@ -123,8 +125,6 @@ with st.sidebar:
         if bool(available_models) != had_models:
             st.rerun()
 
-    _deployment_status()
-
     st.header("Configuration")
     available_models = st.session_state.get("_available_models", [])
 
@@ -142,6 +142,8 @@ with st.sidebar:
         if available_models:
             prev = st.session_state.get(saved_key, default)
             idx = available_models.index(prev) if prev and prev in available_models else None
+            if idx is not None:
+                st.session_state.pop(key, None)
             st.selectbox(
                 label,
                 options=available_models,
@@ -150,6 +152,7 @@ with st.sidebar:
                 key=key,
             )
         else:
+            st.session_state.pop(key, None)
             st.selectbox(
                 label,
                 options=["Could not fetch models"],
@@ -168,6 +171,8 @@ with st.sidebar:
         key="ethos_temperature",
     )
     _model_select("LLM Provider", "llm_model_id")
+
+    _deployment_status()
 
 # ── Main area ───────────────────────────────────────────────────────────────
 dataset_names = (
@@ -188,7 +193,8 @@ col_sc, col_pt = st.columns(2)
 with col_sc:
     scenario = st.selectbox(
         "Scenario",
-        options=list(SCENARIO_TASKS),
+        options=list(Scenario),
+        format_func=lambda s: SCENARIO_DESCRIPTION[s],
         index=None,
         placeholder="Choose scenario",
     )
@@ -276,6 +282,7 @@ if dataset_name and scenario:
                 summarizer = SummaryGenerator(
                     dataset=ds,
                     selected_idx=selected_idx,
+                    scenario=scenario,
                     scenario_context=SCENARIO_CONTEXT.get(scenario, ""),
                     model_id=llm_model,
                     base_url=DEFAULT_BASE_URL,

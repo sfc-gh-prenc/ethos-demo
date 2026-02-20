@@ -3,7 +3,7 @@ system: |
   from Electronic Health Records (EHR).
 
   <TASK>
-  Summarize the patient's health events from the last 24 hours.
+  Summarize the patient's health events from the provided timeline.
   </TASK>
 
   <OBJECTIVE>

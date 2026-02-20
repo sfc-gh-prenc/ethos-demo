@@ -1,5 +1,6 @@
 """Streaming EHR summary generator backed by a chat LLM."""
 
+import logging
 import queue
 import threading
 import time
@@ -9,8 +10,15 @@ from typing import TYPE_CHECKING, ClassVar
 import yaml
 
 from ethos_demo.client import stream_chat_completion
-from ethos_demo.config import DEFAULT_BASE_URL, PROMPTS_DIR
-from ethos_demo.data import get_last_24h_history, get_patient_demographics
+from ethos_demo.config import DEFAULT_BASE_URL, PROMPTS_DIR, Scenario
+from ethos_demo.data import (
+    get_last_24h_history,
+    get_patient_demographics,
+    get_stay_history,
+    get_triage_history,
+)
+
+_logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from ethos.datasets import InferenceDataset
@@ -27,11 +35,18 @@ class SummaryGenerator:
         ("Thinking…", 0.0),
     ]
 
+    _HISTORY_FN: ClassVar[dict] = {
+        Scenario.TRIAGE: get_triage_history,
+        Scenario.HOSPITAL_ADMISSION: get_last_24h_history,
+        Scenario.HOSPITAL_DISCHARGE: get_stay_history,
+    }
+
     def __init__(
         self,
         *,
         dataset: "InferenceDataset",
         selected_idx: int,
+        scenario: Scenario,
         scenario_context: str,
         model_id: str,
         base_url: str = DEFAULT_BASE_URL,
@@ -40,6 +55,7 @@ class SummaryGenerator:
     ) -> None:
         self.dataset = dataset
         self.selected_idx = selected_idx
+        self.scenario = scenario
         self.scenario_context = scenario_context
         self.model_id = model_id
         self.base_url = base_url
@@ -48,7 +64,9 @@ class SummaryGenerator:
 
     def _build_messages(self) -> list[dict[str, str]]:
         demographics = get_patient_demographics(self.dataset, self.selected_idx)
-        timeline_events = get_last_24h_history(self.dataset, self.selected_idx)
+        history_fn = self._HISTORY_FN[self.scenario]
+        timeline_events = history_fn(self.dataset, self.selected_idx)
+        _logger.debug("EHR summary event tokens (%s): %s", self.scenario, timeline_events)
 
         with open(PROMPTS_DIR / "ehr_summary.yaml") as f:
             prompt_tpl = yaml.safe_load(f)

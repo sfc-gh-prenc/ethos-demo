@@ -1,6 +1,20 @@
 """Shared constants for the ETHOS Demo application."""
 
+from enum import StrEnum
 from pathlib import Path
+
+
+class Scenario(StrEnum):
+    TRIAGE = "Triage"
+    HOSPITAL_ADMISSION = "Hospital Admission"
+    HOSPITAL_DISCHARGE = "Hospital Discharge"
+
+
+SCENARIO_DESCRIPTION: dict[Scenario, str] = {
+    Scenario.TRIAGE: "Triage — patient came to ED and was triaged",
+    Scenario.HOSPITAL_ADMISSION: "Admission — patient was admitted to hospital",
+    Scenario.HOSPITAL_DISCHARGE: "Discharge — patient was discharged from hospital",
+}
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TOKENIZED_DATASETS_DIR = PROJECT_ROOT / "data" / "tokenized_datasets"
@@ -13,10 +27,10 @@ API_KEY = "fake-key"
 HEALTH_POLL_SECONDS = 5
 HEALTH_TIMEOUT_SECONDS = 1
 
-SCENARIO_TASKS: dict[str, list[str]] = {
-    "Triage": ["ed_hospitalization", "ed_critical_outcome"],
-    "Hospital Admission": ["icu_admission", "icu_mortality"],
-    "Hospital Discharge": ["readmission_30d", "readmission_90d"],
+SCENARIO_TASKS: dict[Scenario, list[str]] = {
+    Scenario.TRIAGE: ["ed_hospitalization", "ed_critical_outcome"],
+    Scenario.HOSPITAL_ADMISSION: ["icu_admission", "icu_mortality"],
+    Scenario.HOSPITAL_DISCHARGE: ["readmission_30d", "readmission_90d"],
 }
 
 # Maps app-level task names to the underlying ethos dataset task names.
@@ -38,21 +52,24 @@ TASK_DISPLAY: dict[str, dict[str, str]] = {
     "readmission_90d": {"icon": "\U0001f3e5", "title": "90-Day Readmission"},
 }
 
-SCENARIO_CONTEXT: dict[str, str] = {
-    "Triage": (
-        "This patient has just arrived at the Emergency Department and is being triaged. "
-        "The summary should help the triage clinician rapidly assess acuity and identify "
-        "immediate risks."
+SCENARIO_CONTEXT: dict[Scenario, str] = {
+    Scenario.TRIAGE: (
+        "The patient is presenting to the Emergency Department. They are being registered "
+        "and triaged. Vitals are being measured, acuity level is being assessed, and the "
+        "clinical team is determining the urgency of care needed. "
+        "The timeline events below are from the triage encounter."
     ),
-    "Hospital Admission": (
-        "This patient is being admitted to the hospital from the Emergency Department. "
-        "The summary should help the admitting team understand the clinical picture and "
-        "prioritize initial workup."
+    Scenario.HOSPITAL_ADMISSION: (
+        "The patient is being admitted to the hospital. The admitting team is reviewing "
+        "the clinical picture, evaluating the need for ICU-level care, and prioritizing "
+        "the initial workup. "
+        "The timeline events below cover the last 24 hours before admission."
     ),
-    "Hospital Discharge": (
-        "This patient is being discharged from the hospital. The summary should help "
-        "the discharging clinician quickly understand the patient's recent clinical "
-        "course and current status at the time of discharge."
+    Scenario.HOSPITAL_DISCHARGE: (
+        "The patient is being discharged from the hospital. The care team is reviewing "
+        "the clinical course, assessing readiness for discharge, and evaluating the risk "
+        "of short-term and medium-term readmission. "
+        "The timeline events below cover the entire hospital stay from admission to discharge."
     ),
 }
 
