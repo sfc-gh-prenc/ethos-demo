@@ -24,8 +24,8 @@ DEFAULT_ETHOS_MODEL = "ethos-gpt"
 DEFAULT_ETHOS_TEMPERATURE = 1.0
 DEFAULT_LLM_MODEL = "deepseek"
 API_KEY = "fake-key"
-HEALTH_POLL_SECONDS = 5
-HEALTH_TIMEOUT_SECONDS = 1
+HEALTH_POLL_SECONDS = 15
+HEALTH_TIMEOUT_SECONDS = 3
 
 SCENARIO_TASKS: dict[Scenario, list[str]] = {
     Scenario.TRIAGE: ["ed_hospitalization", "ed_critical_outcome"],
