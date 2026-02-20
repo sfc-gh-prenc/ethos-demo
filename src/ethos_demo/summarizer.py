@@ -53,17 +53,17 @@ class SummaryGenerator:
         with open(PROMPTS_DIR / "ehr_summary.yaml") as f:
             prompt_tpl = yaml.safe_load(f)
 
-        user_msg = prompt_tpl["user"].format(
-            scenario_context=self.scenario_context,
-            marital_status=demographics.get("Marital Status", "unknown"),
-            race=demographics.get("Race", "unknown"),
-            gender=demographics.get("Gender", "unknown"),
-            age=demographics.get("Age", "unknown"),
-            timeline_events=timeline_events,
-        )
+        fmt_kwargs = {
+            "scenario_context": self.scenario_context,
+            "marital_status": demographics.get("Marital Status", "unknown"),
+            "race": demographics.get("Race", "unknown"),
+            "gender": demographics.get("Gender", "unknown"),
+            "age": demographics.get("Age", "unknown"),
+            "timeline_events": timeline_events,
+        }
         return [
-            {"role": "system", "content": prompt_tpl["system"]},
-            {"role": "user", "content": user_msg},
+            {"role": "system", "content": prompt_tpl["system"].format(**fmt_kwargs)},
+            {"role": "user", "content": prompt_tpl["user"].format(**fmt_kwargs)},
         ]
 
     def _stream_worker(
