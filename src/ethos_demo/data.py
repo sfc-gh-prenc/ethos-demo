@@ -10,21 +10,26 @@ import streamlit as st
 from ethos.datasets import InferenceDataset
 from ethos.vocabulary import Vocabulary
 
-from ethos_demo.config import TOKENIZED_DATASETS_DIR
+from ethos_demo.config import TASK_DATASET_MAP, TOKENIZED_DATASETS_DIR
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_dataset_task(task: str) -> str:
+    """Map an app-level task name to the underlying ethos dataset task."""
+    return TASK_DATASET_MAP.get(task, task)
 
 
 @st.cache_resource
 def load_dataset(dataset_name: str, task: str) -> InferenceDataset:
     input_dir = TOKENIZED_DATASETS_DIR / dataset_name / "test"
-    return InferenceDataset.from_task(task, input_dir=input_dir)
+    return InferenceDataset.from_task(_resolve_dataset_task(task), input_dir=input_dir)
 
 
 @st.cache_data
 def _extract_identities(dataset_name: str, task: str) -> pl.DataFrame:
     """Return (patient_id, prediction_time, idx) for every sample in a task dataset."""
-    ds = load_dataset(dataset_name, task)
+    ds = load_dataset(dataset_name, _resolve_dataset_task(task))
     patient_ids, prediction_times = [], []
     for i in range(len(ds)):
         si = ds.start_indices[i].item()
@@ -167,6 +172,27 @@ def get_sample_prompt(dataset: InferenceDataset, idx: int) -> tuple[str, int, li
     return prompt, len(input_ids), stop_tokens
 
 
+_24H_US = int(timedelta(hours=24) / timedelta(microseconds=1))
+
+
+def get_last_24h_history(dataset: InferenceDataset, idx: int) -> str:
+    """Decode the timeline tokens from the last 24 hours before prediction time."""
+    start_idx = dataset.start_indices[idx].item()
+    timeline_start_idx = dataset.patient_offset_at_idx[start_idx].item()
+    if start_idx - timeline_start_idx + 1 > dataset.timeline_size:
+        timeline_start_idx = start_idx + 1 - dataset.timeline_size
+
+    prediction_time_us = int(dataset.times[start_idx].item())
+    cutoff_us = prediction_time_us - _24H_US
+
+    times_slice = dataset.times[timeline_start_idx : start_idx + 1]
+    first_in_window = int((times_slice >= cutoff_us).nonzero(as_tuple=False)[0].item())
+    window_start = timeline_start_idx + first_in_window
+
+    tokens = dataset.vocab.decode(dataset.tokens[window_start : start_idx + 1])
+    return " ".join(t for t in tokens if t is not None)
+
+
 def get_sample_context_stats(dataset: InferenceDataset, idx: int) -> dict[str, str]:
     """Return EHR history time span and token count for sample *idx*."""
     x, _y = dataset[idx]
@@ -205,7 +231,8 @@ _POSITIVE_OUTCOME: dict[str, tuple[set[str], timedelta | None]] = {
     "ed_critical_outcome": ({"ICU_ADMISSION", "MEDS_DEATH"}, timedelta(hours=12)),
     "icu_admission": ({"ICU_ADMISSION", "MEDS_DEATH"}, None),
     "icu_mortality": ({"MEDS_DEATH"}, None),
-    "readmission": ({"HOSPITAL_ADMISSION", "MEDS_DEATH"}, timedelta(days=30)),
+    "readmission_30d": ({"HOSPITAL_ADMISSION", "MEDS_DEATH"}, timedelta(days=30)),
+    "readmission_90d": ({"HOSPITAL_ADMISSION", "MEDS_DEATH"}, timedelta(days=90)),
 }
 
 

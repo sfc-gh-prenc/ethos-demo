@@ -5,21 +5,25 @@ import threading
 from datetime import timedelta
 
 import streamlit as st
+import yaml
 
-from ethos_demo.client import check_health, list_models
+from ethos_demo.client import check_health, list_models, stream_chat_completion
 from ethos_demo.config import (
     DEFAULT_BASE_URL,
     HEALTH_POLL_SECONDS,
     N_PER_REQUEST,
     N_REQUESTS,
     N_SAMPLES,
+    PROMPTS_DIR,
     SAMPLE_SEED,
+    SCENARIO_CONTEXT,
     SCENARIO_TASKS,
     TASK_DISPLAY,
     TOKENIZED_DATASETS_DIR,
 )
 from ethos_demo.data import (
     build_sample_labels,
+    get_last_24h_history,
     get_patient_demographics,
     get_sample_context_stats,
     get_sample_identity,
@@ -163,6 +167,7 @@ if dataset_name and scenario:
         if st.session_state.get("_last_selection") != current_key:
             for t in tasks:
                 st.session_state.pop(f"prob_{t}", None)
+            st.session_state.pop("_ehr_summary", None)
             st.session_state["_last_selection"] = current_key
 
         demographics = get_patient_demographics(ds, selected_idx)
@@ -177,7 +182,21 @@ if dataset_name and scenario:
             )
 
         context_stats = get_sample_context_stats(ds, selected_idx)
-        st.subheader("EHR History")
+
+        llm_model = st.session_state.get("llm_model_id")
+        has_llm = bool(llm_model and llm_model != "Could not fetch models")
+
+        ehr_hdr_col, ehr_btn_col = st.columns([10, 1])
+        with ehr_hdr_col:
+            st.subheader("EHR History")
+        with ehr_btn_col:
+            summary_clicked = st.button(
+                "",
+                icon=":material/edit_note:",
+                disabled=not has_llm,
+                help="Summarize last 24h with LLM" if has_llm else "Select an LLM Provider first",
+            )
+
         ehr_cols = st.columns(len(demographics))
         for col, (key, value) in zip(ehr_cols, context_stats.items(), strict=False):
             col.markdown(
@@ -185,6 +204,69 @@ if dataset_name and scenario:
                 f"<span style='font-size:1.3em'>{value}</span>",
                 unsafe_allow_html=True,
             )
+
+        # ── EHR Summary (streaming LLM) ─────────────────────────────────
+        summary_ph = st.empty()
+
+        if st.session_state.get("_ehr_summary"):
+            summary_ph.markdown(
+                f"<span style='color:gray'>EHR Summary</span><br>"
+                f"<span style='font-size:1.1em'>{st.session_state['_ehr_summary']}</span>",
+                unsafe_allow_html=True,
+            )
+
+        if summary_clicked:
+            st.session_state.pop("_ehr_summary", None)
+            with open(PROMPTS_DIR / "ehr_summary.yaml") as f:
+                prompt_tpl = yaml.safe_load(f)
+
+            timeline_events = get_last_24h_history(ds, selected_idx)
+            user_msg = prompt_tpl["user"].format(
+                scenario_context=SCENARIO_CONTEXT.get(scenario, ""),
+                marital_status=demographics.get("Marital Status", "unknown"),
+                race=demographics.get("Race", "unknown"),
+                gender=demographics.get("Gender", "unknown"),
+                age=demographics.get("Age", "unknown"),
+                timeline_events=timeline_events,
+            )
+            messages = [
+                {"role": "system", "content": prompt_tpl["system"]},
+                {"role": "user", "content": user_msg},
+            ]
+
+            full_text = ""
+            visible_text = ""
+            think_done = False
+            with summary_ph.container():
+                text_area = st.empty()
+                text_area.markdown(
+                    "<span style='color:gray'>EHR Summary</span><br>"
+                    "<span style='font-size:1.1em'>Thinking…</span>",
+                    unsafe_allow_html=True,
+                )
+                for delta in stream_chat_completion(
+                    messages, model=llm_model, base_url=DEFAULT_BASE_URL
+                ):
+                    full_text += delta
+
+                    if not think_done:
+                        if "</think>" in full_text:
+                            think_done = True
+                            visible_text = full_text.split("</think>", 1)[1].strip()
+                        else:
+                            continue
+
+                    else:
+                        visible_text = full_text.split("</think>", 1)[1].strip()
+
+                    if visible_text:
+                        text_area.markdown(
+                            f"<span style='color:gray'>EHR Summary</span><br>"
+                            f"<span style='font-size:1.1em'>{visible_text}</span>",
+                            unsafe_allow_html=True,
+                        )
+
+            st.session_state["_ehr_summary"] = visible_text
 
         # ── Estimate outcomes ────────────────────────────────────────────
         st.divider()

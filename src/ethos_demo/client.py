@@ -1,5 +1,7 @@
 """Thin OpenAI-compatible client for talking to the Ray Serve vLLM backend."""
 
+from collections.abc import Generator
+
 import httpx
 from openai import AsyncOpenAI, OpenAI
 
@@ -96,3 +98,23 @@ async def send_raw_completion_async(
         **kwargs,
     )
     return [(c.text, c.finish_reason) for c in response.choices]
+
+
+def stream_chat_completion(
+    messages: list[dict[str, str]],
+    *,
+    model: str,
+    base_url: str = DEFAULT_BASE_URL,
+    **kwargs,
+) -> Generator[str, None, None]:
+    """Stream a chat completion, yielding text deltas."""
+    client = get_client(base_url)
+    stream = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        stream=True,
+        **kwargs,
+    )
+    for chunk in stream:
+        if chunk.choices and chunk.choices[0].delta.content:
+            yield chunk.choices[0].delta.content
