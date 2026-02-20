@@ -5,16 +5,14 @@ import threading
 from datetime import timedelta
 
 import streamlit as st
-import yaml
 
-from ethos_demo.client import check_health, list_models, stream_chat_completion
+from ethos_demo.client import check_health, list_models
 from ethos_demo.config import (
     DEFAULT_BASE_URL,
     HEALTH_POLL_SECONDS,
     N_PER_REQUEST,
     N_REQUESTS,
     N_SAMPLES,
-    PROMPTS_DIR,
     SAMPLE_SEED,
     SCENARIO_CONTEXT,
     SCENARIO_TASKS,
@@ -23,7 +21,6 @@ from ethos_demo.config import (
 )
 from ethos_demo.data import (
     build_sample_labels,
-    get_last_24h_history,
     get_patient_demographics,
     get_sample_context_stats,
     get_sample_identity,
@@ -31,6 +28,7 @@ from ethos_demo.data import (
     sample_common_indices,
 )
 from ethos_demo.estimator import OutcomeEstimator
+from ethos_demo.summarizer import SummaryGenerator
 
 _logger = logging.getLogger("ethos_demo")
 _logger.setLevel(logging.DEBUG)
@@ -217,54 +215,30 @@ if dataset_name and scenario:
 
         if summary_clicked:
             st.session_state.pop("_ehr_summary", None)
-            with open(PROMPTS_DIR / "ehr_summary.yaml") as f:
-                prompt_tpl = yaml.safe_load(f)
 
-            timeline_events = get_last_24h_history(ds, selected_idx)
-            user_msg = prompt_tpl["user"].format(
-                scenario_context=SCENARIO_CONTEXT.get(scenario, ""),
-                marital_status=demographics.get("Marital Status", "unknown"),
-                race=demographics.get("Race", "unknown"),
-                gender=demographics.get("Gender", "unknown"),
-                age=demographics.get("Age", "unknown"),
-                timeline_events=timeline_events,
+            _summary_html = (
+                "<span style='color:gray'>EHR Summary</span><br>"
+                "<span style='font-size:1.1em'>{msg}</span>"
             )
-            messages = [
-                {"role": "system", "content": prompt_tpl["system"]},
-                {"role": "user", "content": user_msg},
-            ]
 
-            full_text = ""
-            visible_text = ""
-            think_done = False
             with summary_ph.container():
                 text_area = st.empty()
-                text_area.markdown(
-                    "<span style='color:gray'>EHR Summary</span><br>"
-                    "<span style='font-size:1.1em'>Thinking…</span>",
-                    unsafe_allow_html=True,
+                summarizer = SummaryGenerator(
+                    dataset=ds,
+                    selected_idx=selected_idx,
+                    scenario_context=SCENARIO_CONTEXT.get(scenario, ""),
+                    model_id=llm_model,
+                    base_url=DEFAULT_BASE_URL,
+                    on_status=lambda msg: text_area.markdown(
+                        _summary_html.format(msg=msg), unsafe_allow_html=True
+                    ),
                 )
-                for delta in stream_chat_completion(
-                    messages, model=llm_model, base_url=DEFAULT_BASE_URL
-                ):
-                    full_text += delta
-
-                    if not think_done:
-                        if "</think>" in full_text:
-                            think_done = True
-                            visible_text = full_text.split("</think>", 1)[1].strip()
-                        else:
-                            continue
-
-                    else:
-                        visible_text = full_text.split("</think>", 1)[1].strip()
-
-                    if visible_text:
-                        text_area.markdown(
-                            f"<span style='color:gray'>EHR Summary</span><br>"
-                            f"<span style='font-size:1.1em'>{visible_text}</span>",
-                            unsafe_allow_html=True,
-                        )
+                visible_text = ""
+                for visible_text in summarizer.run():
+                    text_area.markdown(
+                        _summary_html.format(msg=visible_text),
+                        unsafe_allow_html=True,
+                    )
 
             st.session_state["_ehr_summary"] = visible_text
 
