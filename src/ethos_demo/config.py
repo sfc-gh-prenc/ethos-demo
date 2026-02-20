@@ -59,5 +59,5 @@ MODEL_CONTEXT_SIZE = 4096
 
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
-N_REQUESTS = 10
+N_REQUESTS = 100
 N_PER_REQUEST = 10

@@ -274,7 +274,7 @@ if dataset_name and scenario:
         ethos_model = st.session_state.get("ethos_model_id")
         has_model = bool(ethos_model and ethos_model != "Could not fetch models")
 
-        btn_col, spinner_col, prog_col = st.columns([1, 0.2, 2.8])
+        btn_col, spinner_col, _btn_spacer = st.columns([1, 0.2, 2.8])
         with btn_col:
             if estimating:
                 cancel_clicked = st.button("Cancel", use_container_width=True)
@@ -291,11 +291,10 @@ if dataset_name and scenario:
                     "<div class='health-spinner' style='margin-top:8px'></div>",
                     unsafe_allow_html=True,
                 )
-        with prog_col:
-            progress_ph = st.empty()
 
         card_cols = st.columns(len(tasks))
         placeholders: dict[str, st.delta_generator.DeltaGenerator] = {}
+        progress_phs: dict[str, st.delta_generator.DeltaGenerator] = {}
         for col, t in zip(card_cols, tasks, strict=False):
             info = TASK_DISPLAY[t]
             with col:
@@ -317,6 +316,7 @@ if dataset_name and scenario:
                         "<div style='text-align:center;font-size:2em;color:gray'>???%</div>",
                         unsafe_allow_html=True,
                     )
+                progress_phs[t] = st.empty()
 
         if not estimating and run_clicked:
             for t in tasks:
@@ -334,8 +334,8 @@ if dataset_name and scenario:
 
         if estimating:
 
-            def _on_progress(completed: int, total: int) -> None:
-                progress_ph.progress(completed / total, text=f"{completed}/{total}")
+            def _on_progress(task_name: str, completed: int, total: int) -> None:
+                progress_phs[task_name].progress(completed / total, text=f"{completed}/{total}")
 
             def _on_task_update(task_name: str, prob: float) -> None:
                 st.session_state[f"prob_{task_name}"] = prob
@@ -360,7 +360,8 @@ if dataset_name and scenario:
                 cancel_event=cancel_ev,
             )
             estimator.run()
-            progress_ph.empty()
+            for ph in progress_phs.values():
+                ph.empty()
             st.session_state["_estimating"] = False
             st.rerun()
 

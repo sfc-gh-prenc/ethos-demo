@@ -72,6 +72,7 @@ class OutcomeEstimator:
 
         self._task_data: dict[str, tuple[InferenceDataset, str, int, list[str]]] = {}
         self.results: dict[str, TaskResult] = {t: TaskResult() for t in tasks}
+        self._task_completed: dict[str, int] = dict.fromkeys(tasks, 0)
 
     def _prepare(self) -> None:
         """Load datasets, resolve per-task sample index, and extract prompts."""
@@ -81,23 +82,27 @@ class OutcomeEstimator:
             prompt, n_input_tokens, stop_tokens = get_sample_prompt(ds, idx)
             self._task_data[t] = (ds, prompt, n_input_tokens, stop_tokens)
 
-    async def _send_one(self, task_name: str) -> tuple[str, list[tuple[str, str]]]:
-        _ds, prompt, n_tok, stops = self._task_data[task_name]
-        batch = await send_raw_completion_async(
-            prompt,
-            n_input_tokens=n_tok,
-            model=self.model_id,
-            base_url=self.base_url,
-            n=self.n_per_request,
-            stop=stops,
-        )
-        return task_name, batch
+    async def _send_one(
+        self, task_name: str, sem: asyncio.Semaphore
+    ) -> tuple[str, list[tuple[str, str]]]:
+        async with sem:
+            _ds, prompt, n_tok, stops = self._task_data[task_name]
+            batch = await send_raw_completion_async(
+                prompt,
+                n_input_tokens=n_tok,
+                model=self.model_id,
+                base_url=self.base_url,
+                n=self.n_per_request,
+                stop=stops,
+            )
+            return task_name, batch
 
     async def _run(self) -> None:
+        sem = asyncio.Semaphore(20)
         futures = [
-            asyncio.ensure_future(self._send_one(t))
-            for t in self.tasks
+            asyncio.ensure_future(self._send_one(t, sem))
             for _ in range(self.n_requests)
+            for t in self.tasks
         ]
         total = len(futures)
         pending = set(futures)
@@ -138,8 +143,9 @@ class OutcomeEstimator:
                     (result.probability or 0) * 100,
                 )
 
+                self._task_completed[task_name] += 1
                 if self.on_progress:
-                    self.on_progress(completed, total)
+                    self.on_progress(task_name, self._task_completed[task_name], self.n_requests)
 
                 if self.on_task_update and result.probability is not None:
                     self.on_task_update(task_name, result.probability)
