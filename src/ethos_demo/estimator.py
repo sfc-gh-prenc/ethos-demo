@@ -51,6 +51,7 @@ class OutcomeEstimator:
         tasks: list[str],
         model_id: str,
         base_url: str,
+        temperature: float = 1.0,
         n_requests: int = 10,
         n_per_request: int = 10,
         on_progress: Callable[[int, int], None] | None = None,
@@ -63,6 +64,7 @@ class OutcomeEstimator:
         self.tasks = tasks
         self.model_id = model_id
         self.base_url = base_url
+        self.temperature = temperature
         self.n_requests = n_requests
         self.n_per_request = n_per_request
         self.on_progress = on_progress
@@ -94,6 +96,7 @@ class OutcomeEstimator:
                 base_url=self.base_url,
                 n=self.n_per_request,
                 stop=stops,
+                temperature=self.temperature,
             )
             return task_name, batch
 

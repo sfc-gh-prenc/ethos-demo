@@ -9,6 +9,7 @@ import streamlit as st
 from ethos_demo.client import check_health, list_models
 from ethos_demo.config import (
     DEFAULT_BASE_URL,
+    DEFAULT_ETHOS_TEMPERATURE,
     HEALTH_POLL_SECONDS,
     N_PER_REQUEST,
     N_REQUESTS,
@@ -42,37 +43,72 @@ st.title("ETHOS Demo")
 
 # ── Sidebar ───────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown(
-        "<style>"
-        "@keyframes _espin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}"
-        ".health-spinner{width:20px;height:20px;border:3px solid #e0e0e0;"
-        "border-top:3px solid #666;border-radius:50%;"
-        "animation:_espin .8s linear infinite;margin:8px auto 0}"
-        "</style>",
-        unsafe_allow_html=True,
+    _SIDEBAR_CSS = (
+        ".status-row{display:flex;align-items:center;gap:8px;height:28px}"
+        ".status-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}"
+        ".status-dot.ok{background:#4caf50}"
+        ".status-dot.err{background:#f44336}"
+        ".status-text{font-size:0.85em}"
+        ".st-key-health_box [data-testid='stElementContainer']:has(button)"
+        "{height:20px;overflow:hidden;margin-bottom:-4px!important}"
+        ".st-key-health_box button[disabled]{visibility:hidden}"
+        ".st-key-health_box button"
+        "{padding:0!important;min-height:0!important}"
+        "@keyframes _spin{to{transform:rotate(360deg)}}"
+        ".st-key-health_loading span[data-testid='stIconMaterial']"
+        "{animation:_spin .7s linear infinite}"
     )
+    st.markdown(f"<style>{_SIDEBAR_CSS}</style>", unsafe_allow_html=True)
+
+    def _status_html(dot_cls: str, label: str) -> str:
+        return (
+            f"<div class='status-row'>"
+            f"<span style='color:gray;font-size:0.8em'>ETHOS</span>"
+            f"<span class='status-dot {dot_cls}'></span>"
+            f"<span class='status-text'>{label}</span>"
+            f"</div>"
+        )
+
+    def _on_retry():
+        st.session_state["_health_loading"] = True
 
     @st.fragment(run_every=timedelta(seconds=HEALTH_POLL_SECONDS))
     def _deployment_status():
-        hdr_col, btn_col = st.columns([5, 1])
-        with hdr_col:
-            st.header("ETHOS Status")
-        with btn_col:
-            btn_ph = st.empty()
+        loading = st.session_state.pop("_health_loading", False)
+        was_healthy = st.session_state.get("health_result", None)
 
-        btn_ph.markdown("<div class='health-spinner'></div>", unsafe_allow_html=True)
-        healthy = check_health(DEFAULT_BASE_URL)
-        btn_ph.button(
-            "",
-            icon=":material/refresh:",
-            key="refresh_health",
-            help="Check now",
-        )
+        with st.container(key="health_box"):
+            if loading:
+                with st.container(key="health_loading"):
+                    st.button(
+                        "",
+                        icon=":material/progress_activity:",
+                        key="refresh_health",
+                        type="tertiary",
+                    )
+                st.markdown(
+                    _status_html("err", "Checking…"),
+                    unsafe_allow_html=True,
+                )
+                return
 
-        if healthy:
-            st.success("Deployment healthy", icon=":material/check_circle:")
-        else:
-            st.error("Deployment unreachable", icon=":material/error:")
+            st.button(
+                "",
+                icon=":material/refresh:",
+                key="refresh_health",
+                type="tertiary",
+                disabled=bool(was_healthy),
+                on_click=_on_retry,
+            )
+            healthy = check_health(DEFAULT_BASE_URL)
+            st.session_state["health_result"] = healthy
+
+            dot_cls = "ok" if healthy else "err"
+            label = "Connected" if healthy else "Unreachable"
+            st.markdown(
+                _status_html(dot_cls, label),
+                unsafe_allow_html=True,
+            )
 
         if healthy:
             try:
@@ -84,7 +120,7 @@ with st.sidebar:
 
         had_models = bool(st.session_state.get("_available_models"))
         st.session_state["_available_models"] = available_models
-        if available_models and not had_models:
+        if bool(available_models) != had_models:
             st.rerun()
 
     _deployment_status()
@@ -98,10 +134,14 @@ with st.sidebar:
         default: str | None = None,
         placeholder: str = "Choose model ID",
     ) -> None:
+        saved_key = f"_saved_{key}"
+        current = st.session_state.get(key)
+        if current and current != "Could not fetch models":
+            st.session_state[saved_key] = current
+
         if available_models:
-            idx = (
-                available_models.index(default) if default and default in available_models else None
-            )
+            prev = st.session_state.get(saved_key, default)
+            idx = available_models.index(prev) if prev and prev in available_models else None
             st.selectbox(
                 label,
                 options=available_models,
@@ -118,6 +158,15 @@ with st.sidebar:
             )
 
     _model_select("ETHOS Provider", "ethos_model_id")
+    st.slider(
+        "Temp.",
+        min_value=0.0,
+        max_value=2.0,
+        value=DEFAULT_ETHOS_TEMPERATURE,
+        step=0.1,
+        format="%.1f",
+        key="ethos_temperature",
+    )
     _model_select("LLM Provider", "llm_model_id")
 
 # ── Main area ───────────────────────────────────────────────────────────────
@@ -181,8 +230,9 @@ if dataset_name and scenario:
 
         context_stats = get_sample_context_stats(ds, selected_idx)
 
+        connected = bool(st.session_state.get("health_result"))
         llm_model = st.session_state.get("llm_model_id")
-        has_llm = bool(llm_model and llm_model != "Could not fetch models")
+        has_llm = connected and bool(llm_model and llm_model != "Could not fetch models")
 
         ehr_hdr_col, ehr_btn_col = st.columns([10, 1])
         with ehr_hdr_col:
@@ -246,7 +296,7 @@ if dataset_name and scenario:
         st.divider()
         estimating = st.session_state.get("_estimating", False)
         ethos_model = st.session_state.get("ethos_model_id")
-        has_model = bool(ethos_model and ethos_model != "Could not fetch models")
+        has_model = connected and bool(ethos_model and ethos_model != "Could not fetch models")
 
         btn_col, spinner_col, _btn_spacer = st.columns([1, 0.2, 2.8])
         with btn_col:
@@ -327,6 +377,7 @@ if dataset_name and scenario:
                 tasks=tasks,
                 model_id=ethos_model,
                 base_url=DEFAULT_BASE_URL,
+                temperature=st.session_state.get("ethos_temperature", DEFAULT_ETHOS_TEMPERATURE),
                 n_requests=N_REQUESTS,
                 n_per_request=N_PER_REQUEST,
                 on_progress=_on_progress,
