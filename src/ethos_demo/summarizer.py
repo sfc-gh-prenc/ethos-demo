@@ -52,6 +52,7 @@ class SummaryGenerator:
         base_url: str = DEFAULT_BASE_URL,
         on_status: Callable[[str], None] | None = None,
         min_warmup_seconds: float = 3.0,
+        enable_thinking: bool = True,
     ) -> None:
         self.dataset = dataset
         self.selected_idx = selected_idx
@@ -61,6 +62,7 @@ class SummaryGenerator:
         self.base_url = base_url
         self.on_status = on_status
         self.min_warmup_seconds = min_warmup_seconds
+        self.enable_thinking = enable_thinking
 
     def _build_messages(self) -> list[dict[str, str]]:
         demographics = get_patient_demographics(self.dataset, self.selected_idx)
@@ -89,7 +91,10 @@ class SummaryGenerator:
     ) -> None:
         try:
             for delta in stream_chat_completion(
-                messages, model=self.model_id, base_url=self.base_url
+                messages,
+                model=self.model_id,
+                base_url=self.base_url,
+                enable_thinking=self.enable_thinking,
             ):
                 delta_q.put(delta)
         finally:
@@ -115,7 +120,7 @@ class SummaryGenerator:
         time.sleep(remaining)
 
         full_text = ""
-        think_done = False
+        think_done = not self.enable_thinking
         while True:
             try:
                 delta = delta_q.get(timeout=0.05)
@@ -128,9 +133,10 @@ class SummaryGenerator:
             if not think_done:
                 if "</think>" in full_text:
                     think_done = True
+                    full_text = full_text.split("</think>", 1)[1]
                 else:
                     continue
 
-            visible = full_text.split("</think>", 1)[1].strip()
+            visible = full_text.strip()
             if visible:
                 yield visible

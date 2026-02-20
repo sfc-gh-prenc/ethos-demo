@@ -5,8 +5,9 @@ import threading
 from datetime import timedelta
 
 import streamlit as st
+from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
 
-from ethos_demo.client import check_health, list_models
+from ethos_demo.backend import BackendEvent, BackendMonitor
 from ethos_demo.config import (
     DEFAULT_BASE_URL,
     DEFAULT_ETHOS_TEMPERATURE,
@@ -52,7 +53,6 @@ with st.sidebar:
         ".status-dot.ok{background:#4caf50}"
         ".status-dot.err{background:#f44336}"
         ".status-text{font-size:0.85em}"
-        ".st-key-health_box button[disabled]{display:none}"
         ".st-key-health_box button"
         "{padding:0!important;min-height:0!important}"
         "@keyframes _spin{to{transform:rotate(360deg)}}"
@@ -61,6 +61,8 @@ with st.sidebar:
         ".st-key-health_box{position:fixed;bottom:1rem;width:inherit}"
     )
     st.markdown(f"<style>{_SIDEBAR_CSS}</style>", unsafe_allow_html=True)
+
+    backend = BackendMonitor(DEFAULT_BASE_URL)
 
     def _status_html(dot_cls: str, label: str) -> str:
         return (
@@ -71,16 +73,12 @@ with st.sidebar:
             f"</div>"
         )
 
-    def _on_retry():
-        st.session_state["_health_loading"] = True
-
     @st.fragment(run_every=timedelta(seconds=HEALTH_POLL_SECONDS))
     def _deployment_status():
-        loading = st.session_state.pop("_health_loading", False)
-        was_healthy = st.session_state.get("health_result", None)
+        event = backend.poll()
 
         with st.container(key="health_box"):
-            if loading:
+            if event is BackendEvent.CHECKING:
                 with st.container(key="health_loading"):
                     st.button(
                         "",
@@ -94,39 +92,26 @@ with st.sidebar:
                 )
                 return
 
-            st.button(
-                "",
-                icon=":material/refresh:",
-                key="refresh_health",
-                type="tertiary",
-                disabled=bool(was_healthy),
-                on_click=_on_retry,
-            )
-            healthy = check_health(DEFAULT_BASE_URL)
-            st.session_state["health_result"] = healthy
-
-            dot_cls = "ok" if healthy else "err"
-            label = "Connected" if healthy else "Unreachable"
+            if not backend.healthy:
+                st.button(
+                    "",
+                    icon=":material/refresh:",
+                    key="refresh_health",
+                    type="tertiary",
+                    on_click=backend.request_check,
+                )
+            dot_cls = "ok" if backend.healthy else "err"
+            label = "Connected" if backend.healthy else "Unreachable"
             st.markdown(
                 _status_html(dot_cls, label),
                 unsafe_allow_html=True,
             )
 
-        if healthy:
-            try:
-                available_models = list_models(DEFAULT_BASE_URL)
-            except Exception:
-                available_models = []
-        else:
-            available_models = []
+    _deployment_status()
 
-        had_models = bool(st.session_state.get("_available_models"))
-        st.session_state["_available_models"] = available_models
-        if bool(available_models) != had_models:
-            st.rerun()
-
+    # ── Configuration widgets (outside fragment so selection triggers
+    #    a full rerun, updating button states in the main area) ─────
     st.header("Configuration")
-    available_models = st.session_state.get("_available_models", [])
 
     def _model_select(
         label: str,
@@ -139,14 +124,15 @@ with st.sidebar:
         if current and current != "Could not fetch models":
             st.session_state[saved_key] = current
 
-        if available_models:
+        models = backend.models
+        if models:
             prev = st.session_state.get(saved_key, default)
-            idx = available_models.index(prev) if prev and prev in available_models else None
+            idx = models.index(prev) if prev and prev in models else None
             if idx is not None:
                 st.session_state.pop(key, None)
             st.selectbox(
                 label,
-                options=available_models,
+                options=models,
                 index=idx,
                 placeholder=placeholder,
                 key=key,
@@ -171,8 +157,6 @@ with st.sidebar:
         key="ethos_temperature",
     )
     _model_select("LLM Provider", "llm_model_id")
-
-    _deployment_status()
 
 # ── Main area ───────────────────────────────────────────────────────────────
 dataset_names = (
@@ -236,20 +220,9 @@ if dataset_name and scenario:
 
         context_stats = get_sample_context_stats(ds, selected_idx)
 
-        connected = bool(st.session_state.get("health_result"))
-        llm_model = st.session_state.get("llm_model_id")
-        has_llm = connected and bool(llm_model and llm_model != "Could not fetch models")
+        has_llm = backend.has_llm_model
 
-        ehr_hdr_col, ehr_btn_col = st.columns([10, 1])
-        with ehr_hdr_col:
-            st.subheader("EHR History")
-        with ehr_btn_col:
-            summary_clicked = st.button(
-                "",
-                icon=":material/edit_note:",
-                disabled=not has_llm,
-                help="Summarize last 24h with LLM" if has_llm else "Select an LLM Provider first",
-            )
+        st.subheader("EHR History")
 
         ehr_cols = st.columns(len(demographics))
         for col, (key, value) in zip(ehr_cols, context_stats.items(), strict=False):
@@ -259,143 +232,166 @@ if dataset_name and scenario:
                 unsafe_allow_html=True,
             )
 
-        # ── EHR Summary (streaming LLM) ─────────────────────────────────
-        summary_ph = st.empty()
+        # ── EHR Summary (streaming LLM, runs as fragment) ────────────────
+        _summary_html = (
+            "<span style='color:gray'>EHR Summary</span><br>"
+            "<span style='font-size:1.1em'>{msg}</span>"
+        )
 
-        if st.session_state.get("_ehr_summary"):
-            summary_ph.markdown(
-                f"<span style='color:gray'>EHR Summary</span><br>"
-                f"<span style='font-size:1.1em'>{st.session_state['_ehr_summary']}</span>",
-                unsafe_allow_html=True,
-            )
-
-        if summary_clicked:
-            st.session_state.pop("_ehr_summary", None)
-
-            _summary_html = (
-                "<span style='color:gray'>EHR Summary</span><br>"
-                "<span style='font-size:1.1em'>{msg}</span>"
-            )
-
-            with summary_ph.container():
-                text_area = st.empty()
-                summarizer = SummaryGenerator(
-                    dataset=ds,
-                    selected_idx=selected_idx,
-                    scenario=scenario,
-                    scenario_context=SCENARIO_CONTEXT.get(scenario, ""),
-                    model_id=llm_model,
-                    base_url=DEFAULT_BASE_URL,
-                    on_status=lambda msg: text_area.markdown(
-                        _summary_html.format(msg=msg), unsafe_allow_html=True
-                    ),
+        @st.fragment
+        def _ehr_summary_fragment():
+            btn_col, _ = st.columns([1, 10])
+            with btn_col:
+                clicked = st.button(
+                    "",
+                    icon=":material/edit_note:",
+                    disabled=not has_llm,
+                    help="Summarize EHR with LLM" if has_llm else "Select an LLM Provider first",
+                    key="summarize_btn",
                 )
-                visible_text = ""
-                for visible_text in summarizer.run():
-                    text_area.markdown(
-                        _summary_html.format(msg=visible_text),
-                        unsafe_allow_html=True,
-                    )
+            if clicked:
+                st.session_state.pop("_ehr_summary", None)
 
-            st.session_state["_ehr_summary"] = visible_text
+            summary_ph = st.empty()
+
+            if st.session_state.get("_ehr_summary"):
+                summary_ph.markdown(
+                    _summary_html.format(msg=st.session_state["_ehr_summary"]),
+                    unsafe_allow_html=True,
+                )
+
+            if clicked:
+                with summary_ph.container():
+                    text_area = st.empty()
+                    summarizer = SummaryGenerator(
+                        dataset=ds,
+                        selected_idx=selected_idx,
+                        scenario=scenario,
+                        scenario_context=SCENARIO_CONTEXT.get(scenario, ""),
+                        model_id=backend.llm_model,
+                        base_url=DEFAULT_BASE_URL,
+                        on_status=lambda msg: text_area.markdown(
+                            _summary_html.format(msg=msg), unsafe_allow_html=True
+                        ),
+                    )
+                    visible_text = ""
+                    for visible_text in summarizer.run():
+                        text_area.markdown(
+                            _summary_html.format(msg=visible_text),
+                            unsafe_allow_html=True,
+                        )
+
+                st.session_state["_ehr_summary"] = visible_text
+
+        _ehr_summary_fragment()
 
         # ── Estimate outcomes ────────────────────────────────────────────
         st.divider()
-        estimating = st.session_state.get("_estimating", False)
-        ethos_model = st.session_state.get("ethos_model_id")
-        has_model = connected and bool(ethos_model and ethos_model != "Could not fetch models")
 
-        btn_col, spinner_col, _btn_spacer = st.columns([1, 0.2, 2.8])
-        with btn_col:
-            if estimating:
-                cancel_clicked = st.button("Cancel", use_container_width=True)
-            else:
-                cancel_clicked = False
-                run_clicked = st.button(
-                    "Estimate Outcomes",
-                    disabled=not has_model,
-                    use_container_width=True,
-                )
-        with spinner_col:
-            if estimating:
-                st.markdown(
-                    "<div class='health-spinner' style='margin-top:8px'></div>",
-                    unsafe_allow_html=True,
-                )
+        @st.fragment(run_every=timedelta(seconds=1))
+        def _estimation_fragment():
+            estimating = st.session_state.get("_estimating", False)
+            has_model = backend.has_ethos_model
 
-        card_cols = st.columns(len(tasks))
-        placeholders: dict[str, st.delta_generator.DeltaGenerator] = {}
-        progress_phs: dict[str, st.delta_generator.DeltaGenerator] = {}
-        for col, t in zip(card_cols, tasks, strict=False):
-            info = TASK_DISPLAY[t]
-            with col:
-                st.markdown(
-                    f"<div style='text-align:center'>"
-                    f"<span style='font-size:5em'>{info['icon']}</span><br>"
-                    f"<b style='font-size:1.3em'>{info['title']}</b></div>",
-                    unsafe_allow_html=True,
-                )
-                placeholders[t] = st.empty()
-                prob = st.session_state.get(f"prob_{t}")
-                if prob is not None:
-                    placeholders[t].markdown(
-                        f"<div style='text-align:center;font-size:2em'>{prob:.0%}</div>",
-                        unsafe_allow_html=True,
-                    )
+            btn_col, spinner_col, _btn_spacer = st.columns([1, 0.2, 2.8])
+            with btn_col:
+                if estimating:
+                    cancel_clicked = st.button("Cancel", use_container_width=True)
                 else:
-                    placeholders[t].markdown(
-                        "<div style='text-align:center;font-size:2em;color:gray'>???%</div>",
+                    cancel_clicked = False
+                    run_clicked = st.button(
+                        "Estimate Outcomes",
+                        disabled=not has_model,
+                        use_container_width=True,
+                    )
+            with spinner_col:
+                if estimating:
+                    st.markdown(
+                        "<div class='health-spinner' style='margin-top:8px'></div>",
                         unsafe_allow_html=True,
                     )
-                progress_phs[t] = st.empty()
 
-        if not estimating and run_clicked:
-            for t in tasks:
-                st.session_state.pop(f"prob_{t}", None)
-            st.session_state["_estimating"] = True
-            st.session_state["_cancel_event"] = threading.Event()
-            st.rerun()
+            card_cols = st.columns(len(tasks))
+            for col, t in zip(card_cols, tasks, strict=False):
+                info = TASK_DISPLAY[t]
+                with col:
+                    st.markdown(
+                        f"<div style='text-align:center'>"
+                        f"<span style='font-size:5em'>{info['icon']}</span><br>"
+                        f"<b style='font-size:1.3em'>{info['title']}</b></div>",
+                        unsafe_allow_html=True,
+                    )
+                    prob = st.session_state.get(f"prob_{t}")
+                    if prob is not None:
+                        st.markdown(
+                            f"<div style='text-align:center;font-size:2em'>{prob:.0%}</div>",
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        st.markdown(
+                            "<div style='text-align:center;font-size:2em;color:gray'>???%</div>",
+                            unsafe_allow_html=True,
+                        )
+                    if estimating:
+                        prog = st.session_state.get(f"_progress_{t}")
+                        if prog is not None:
+                            completed, total = prog
+                            st.progress(completed / total, text=f"{completed}/{total}")
 
-        if estimating and cancel_clicked:
-            cancel_ev = st.session_state.get("_cancel_event")
-            if cancel_ev:
-                cancel_ev.set()
-            st.session_state["_estimating"] = False
-            st.rerun()
+            # ── Start estimation in background thread ──────────────
+            if not estimating and run_clicked:
+                for t in tasks:
+                    st.session_state.pop(f"prob_{t}", None)
+                    st.session_state.pop(f"_progress_{t}", None)
+                st.session_state["_estimating"] = True
+                st.session_state["_cancel_event"] = threading.Event()
 
-        if estimating:
-
-            def _on_progress(task_name: str, completed: int, total: int) -> None:
-                progress_phs[task_name].progress(completed / total, text=f"{completed}/{total}")
-
-            def _on_task_update(task_name: str, prob: float) -> None:
-                st.session_state[f"prob_{task_name}"] = prob
-                placeholders[task_name].markdown(
-                    f"<div style='text-align:center;font-size:2em'>{prob:.0%}</div>",
-                    unsafe_allow_html=True,
+                patient_id, prediction_time = get_sample_identity(ds, selected_idx)
+                estimator = OutcomeEstimator(
+                    dataset_name=dataset_name,
+                    patient_id=patient_id,
+                    prediction_time=prediction_time,
+                    tasks=tasks,
+                    model_id=backend.ethos_model,
+                    base_url=DEFAULT_BASE_URL,
+                    temperature=st.session_state.get(
+                        "ethos_temperature", DEFAULT_ETHOS_TEMPERATURE
+                    ),
+                    n_requests=N_REQUESTS,
+                    n_per_request=N_PER_REQUEST,
+                    on_progress=lambda tn, c, tot: st.session_state.__setitem__(
+                        f"_progress_{tn}", (c, tot)
+                    ),
+                    on_task_update=lambda tn, p: st.session_state.__setitem__(f"prob_{tn}", p),
+                    cancel_event=st.session_state["_cancel_event"],
                 )
 
-            patient_id, prediction_time = get_sample_identity(ds, selected_idx)
-            cancel_ev = st.session_state.get("_cancel_event")
-            estimator = OutcomeEstimator(
-                dataset_name=dataset_name,
-                patient_id=patient_id,
-                prediction_time=prediction_time,
-                tasks=tasks,
-                model_id=ethos_model,
-                base_url=DEFAULT_BASE_URL,
-                temperature=st.session_state.get("ethos_temperature", DEFAULT_ETHOS_TEMPERATURE),
-                n_requests=N_REQUESTS,
-                n_per_request=N_PER_REQUEST,
-                on_progress=_on_progress,
-                on_task_update=_on_task_update,
-                cancel_event=cancel_ev,
-            )
-            estimator.run()
-            for ph in progress_phs.values():
-                ph.empty()
-            st.session_state["_estimating"] = False
-            st.rerun()
+                def _bg() -> None:
+                    try:
+                        estimator.run()
+                    except Exception:
+                        _logger.exception("Estimation failed")
+                    finally:
+                        st.session_state["_estimating"] = False
+                        for t_ in tasks:
+                            st.session_state.pop(f"_progress_{t_}", None)
+
+                thread = threading.Thread(target=_bg, daemon=True)
+                add_script_run_ctx(thread, get_script_run_ctx())
+                thread.start()
+                st.rerun(scope="fragment")
+
+            # ── Cancel ─────────────────────────────────────────────
+            if estimating and cancel_clicked:
+                cancel_ev = st.session_state.get("_cancel_event")
+                if cancel_ev:
+                    cancel_ev.set()
+                st.session_state["_estimating"] = False
+                for t in tasks:
+                    st.session_state.pop(f"_progress_{t}", None)
+                st.rerun(scope="fragment")
+
+        _estimation_fragment()
 
 
 def main():

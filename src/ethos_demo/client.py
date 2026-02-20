@@ -105,14 +105,18 @@ def stream_chat_completion(
     *,
     model: str,
     base_url: str = DEFAULT_BASE_URL,
+    enable_thinking: bool = False,
     **kwargs,
 ) -> Generator[str, None, None]:
     """Stream a chat completion, yielding text deltas."""
     client = get_client(base_url)
+    extra_body = kwargs.pop("extra_body", {})
+    extra_body["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
     stream = client.chat.completions.create(
         model=model,
         messages=messages,
         stream=True,
+        extra_body=extra_body,
         **kwargs,
     )
     for chunk in stream:
