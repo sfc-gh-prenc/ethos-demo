@@ -51,7 +51,7 @@ def main():
 
     ethos_config = LLMConfig(
         model_loading_config={
-            "model_id": "ethos",
+            "model_id": f"ethos-{args.model_path.name.lower()}",
             "model_source": str(args.model_path),
         },
         deployment_config={"num_replicas": ethos_replicas},
