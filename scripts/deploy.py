@@ -1,4 +1,9 @@
-"""Deploy a vLLM model via Ray Serve."""
+"""Deploy vLLM models via Ray Serve.
+
+Deploys two models:
+  - deepseek: deepseek-ai/DeepSeek-R1-Distill-Llama-70B on 2 GPUs
+  - ethos: local model from --model-path on the remaining GPUs
+"""
 
 import argparse
 from pathlib import Path
@@ -7,29 +12,56 @@ import torch
 from ray import serve
 from ray.serve.llm import LLMConfig, build_openai_app
 
+DEEPSEEK_GPUS = 2
+
 
 def main():
-    parser = argparse.ArgumentParser(description="Deploy a vLLM model via Ray Serve")
+    parser = argparse.ArgumentParser(description="Deploy vLLM models via Ray Serve")
     parser.add_argument(
-        "--model-path", type=Path, required=True, help="Local path to model weights"
+        "--model-path", type=Path, required=True, help="Local path to ethos model weights"
     )
-    parser.add_argument("--model-id", type=str, default="ethos", help="Model ID for the API")
-    parser.add_argument("--num-gpus", type=int, default=None, help="Number of GPUs (default: all)")
     parser.add_argument(
         "--gpu-memory-utilization", type=float, default=0.95, help="GPU memory utilization"
     )
     args = parser.parse_args()
 
-    num_gpus = args.num_gpus or torch.cuda.device_count()
+    total_gpus = torch.cuda.device_count()
+    remaining_gpus = total_gpus - DEEPSEEK_GPUS
 
-    llm_config = LLMConfig(
-        model_loading_config={"model_id": args.model_id, "model_source": str(args.model_path)},
-        deployment_config={"num_replicas": num_gpus},
+    if remaining_gpus < 1:
+        raise RuntimeError(
+            f"Need at least {DEEPSEEK_GPUS + 1} GPUs (found {total_gpus}): "
+            f"{DEEPSEEK_GPUS} for deepseek + at least 1 for ethos"
+        )
+
+    # Each ethos replica uses 1 GPU; spawn as many replicas as remaining GPUs
+    ethos_replicas = remaining_gpus
+
+    deepseek_config = LLMConfig(
+        model_loading_config={
+            "model_id": "deepseek",
+            "model_source": "deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
+        },
+        deployment_config={"num_replicas": 1},
         engine_kwargs={
+            "tensor_parallel_size": DEEPSEEK_GPUS,
             "gpu_memory_utilization": args.gpu_memory_utilization,
         },
     )
-    app = build_openai_app({"llm_configs": [llm_config]})
+
+    ethos_config = LLMConfig(
+        model_loading_config={
+            "model_id": "ethos",
+            "model_source": str(args.model_path),
+        },
+        deployment_config={"num_replicas": ethos_replicas},
+        engine_kwargs={
+            "tensor_parallel_size": 1,
+            "gpu_memory_utilization": args.gpu_memory_utilization,
+        },
+    )
+
+    app = build_openai_app({"llm_configs": [deepseek_config, ethos_config]})
     serve.run(app, blocking=True)
 
 
