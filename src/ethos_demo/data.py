@@ -218,9 +218,9 @@ def _format_timedelta(td: timedelta) -> str:
     years, remaining = divmod(total_days, 365)
     months = remaining // 30
     if years > 0:
-        return f"{years}y {months}m" if months else f"{years}y"
+        return f"{years}y {months}mt" if months else f"{years}y"
     if months > 0:
-        return f"{months}m {remaining - months * 30}d"
+        return f"{months}mt {remaining - months * 30}d"
     return f"{total_days}d"
 
 
