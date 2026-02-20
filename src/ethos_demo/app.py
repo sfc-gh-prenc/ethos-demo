@@ -124,7 +124,7 @@ dataset_names = (
     else []
 )
 
-col_ds, col_sc = st.columns(2)
+col_ds, _col_ds_r = st.columns(2)
 with col_ds:
     dataset_name = (
         st.selectbox("Tokenized dataset", options=dataset_names) if dataset_names else None
@@ -132,6 +132,7 @@ with col_ds:
     if not dataset_names:
         st.warning(f"No datasets found in `{TOKENIZED_DATASETS_DIR}`.")
 
+col_sc, col_pt = st.columns(2)
 with col_sc:
     scenario = st.selectbox(
         "Scenario",
@@ -140,6 +141,7 @@ with col_sc:
         placeholder="Choose scenario",
     )
 
+selected_label = None
 if dataset_name and scenario:
     tasks = SCENARIO_TASKS[scenario]
 
@@ -150,10 +152,18 @@ if dataset_name and scenario:
     labels = build_sample_labels(ds, indices)
 
     label_to_idx = {label: idx for idx, label in labels}
-    selected_label = st.selectbox("Patient", options=list(label_to_idx))
+    with col_pt:
+        selected_label = st.selectbox("Patient", options=list(label_to_idx))
 
     if selected_label is not None:
         selected_idx = label_to_idx[selected_label]
+
+        current_key = f"{scenario}:{selected_label}"
+        if st.session_state.get("_last_selection") != current_key:
+            for t in tasks:
+                st.session_state.pop(f"prob_{t}", None)
+            st.session_state["_last_selection"] = current_key
+
         demographics = get_patient_demographics(ds, selected_idx)
 
         st.subheader("Demographics")
@@ -166,8 +176,9 @@ if dataset_name and scenario:
             )
 
         context_stats = get_sample_context_stats(ds, selected_idx)
-        ctx_cols = st.columns(len(context_stats))
-        for col, (key, value) in zip(ctx_cols, context_stats.items(), strict=False):
+        st.subheader("EHR History")
+        ehr_cols = st.columns(len(demographics))
+        for col, (key, value) in zip(ehr_cols, context_stats.items(), strict=False):
             col.markdown(
                 f"<span style='color:gray'>{key}</span><br>"
                 f"<span style='font-size:1.3em'>{value}</span>",
@@ -196,24 +207,26 @@ if dataset_name and scenario:
             with col:
                 st.markdown(
                     f"<div style='text-align:center'>"
-                    f"<span style='font-size:3em'>{info['icon']}</span><br>"
-                    f"<b>{info['title']}</b></div>",
+                    f"<span style='font-size:5em'>{info['icon']}</span><br>"
+                    f"<b style='font-size:1.3em'>{info['title']}</b></div>",
                     unsafe_allow_html=True,
                 )
                 placeholders[t] = st.empty()
                 prob = st.session_state.get(f"prob_{t}")
                 if prob is not None:
                     placeholders[t].markdown(
-                        f"<div style='text-align:center;font-size:1.5em'>{prob:.0%}</div>",
+                        f"<div style='text-align:center;font-size:2em'>{prob:.0%}</div>",
                         unsafe_allow_html=True,
                     )
                 else:
                     placeholders[t].markdown(
-                        "<div style='text-align:center;font-size:1.5em;color:gray'>??%</div>",
+                        "<div style='text-align:center;font-size:2em;color:gray'>???%</div>",
                         unsafe_allow_html=True,
                     )
 
         if run_clicked:
+            for t in tasks:
+                st.session_state.pop(f"prob_{t}", None)
             st.session_state["_estimating"] = True
             st.rerun()
 
@@ -225,7 +238,7 @@ if dataset_name and scenario:
             def _on_task_update(task_name: str, prob: float) -> None:
                 st.session_state[f"prob_{task_name}"] = prob
                 placeholders[task_name].markdown(
-                    f"<div style='text-align:center;font-size:1.5em'>{prob:.0%}</div>",
+                    f"<div style='text-align:center;font-size:2em'>{prob:.0%}</div>",
                     unsafe_allow_html=True,
                 )
 

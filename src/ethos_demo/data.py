@@ -111,9 +111,9 @@ def get_patient_demographics(dataset: InferenceDataset, idx: int) -> dict[str, s
         if prefix == "GENDER":
             demographics["Gender"] = "Male" if value == "M" else "Female"
         elif prefix == "RACE":
-            demographics["Race"] = value
+            demographics["Race"] = value.title()
         elif prefix in ("MARITAL", "MARITAL_STATUS"):
-            demographics["Marital Status"] = value
+            demographics["Marital Status"] = value.title()
 
     return demographics
 
@@ -182,8 +182,8 @@ def get_sample_context_stats(dataset: InferenceDataset, idx: int) -> dict[str, s
     span = timedelta(microseconds=time_end_us - time_start_us)
 
     return {
-        "EHR History": _format_timedelta(span),
-        "Token Events": str(n_tokens),
+        "Time": _format_timedelta(span),
+        "Tokens": str(n_tokens),
     }
 
 
