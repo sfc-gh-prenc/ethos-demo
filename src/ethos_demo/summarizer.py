@@ -10,13 +10,14 @@ from typing import TYPE_CHECKING, ClassVar
 import yaml
 
 from ethos_demo.client import stream_chat_completion
-from ethos_demo.config import DEFAULT_BASE_URL, PROMPTS_DIR, Scenario
+from ethos_demo.config import DEFAULT_BASE_URL, PROMPTS_DIR
 from ethos_demo.data import (
     get_last_24h_history,
     get_patient_demographics,
     get_stay_history,
     get_triage_history,
 )
+from ethos_demo.scenarios import Scenario
 
 _logger = logging.getLogger(__name__)
 

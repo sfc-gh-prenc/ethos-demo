@@ -5,60 +5,29 @@ from collections import Counter
 from datetime import UTC, datetime, timedelta
 
 import numpy as np
-import polars as pl
 import streamlit as st
 from ethos.datasets import InferenceDataset
-from ethos.vocabulary import Vocabulary
 
-from ethos_demo.config import TASK_DATASET_MAP, TOKENIZED_DATASETS_DIR
+from ethos_demo.config import TOKENIZED_DATASETS_DIR
 
 logger = logging.getLogger(__name__)
-
-
-def _resolve_dataset_task(task: str) -> str:
-    """Map an app-level task name to the underlying ethos dataset task."""
-    return TASK_DATASET_MAP.get(task, task)
 
 
 @st.cache_resource
 def load_dataset(dataset_name: str, task: str) -> InferenceDataset:
     input_dir = TOKENIZED_DATASETS_DIR / dataset_name / "test"
-    return InferenceDataset.from_task(_resolve_dataset_task(task), input_dir=input_dir)
+    return InferenceDataset.from_task(task, input_dir=input_dir)
 
 
-@st.cache_data
-def _extract_identities(dataset_name: str, task: str) -> pl.DataFrame:
-    """Return (patient_id, prediction_time, idx) for every sample in a task dataset."""
-    ds = load_dataset(dataset_name, _resolve_dataset_task(task))
-    patient_ids, prediction_times = [], []
-    for i in range(len(ds)):
-        si = ds.start_indices[i].item()
-        patient_ids.append(ds.patient_id_at_idx[si].item())
-        prediction_times.append(int(ds.times[si].item()))
-    return pl.DataFrame(
-        {
-            "patient_id": patient_ids,
-            "prediction_time": prediction_times,
-            "idx": list(range(len(ds))),
-        }
-    )
-
-
-def sample_common_indices(
-    dataset_name: str,
-    tasks: list[str],
+def sample_indices(
+    dataset: InferenceDataset,
     n: int,
     seed: int,
 ) -> np.ndarray:
-    """Sample `n` indices (into the first task's dataset) from patients common to all tasks."""
-    dfs = [_extract_identities(dataset_name, t).rename({"idx": f"idx_{t}"}) for t in tasks]
-    common = dfs[0]
-    for df in dfs[1:]:
-        common = common.join(df, on=["patient_id", "prediction_time"], how="inner")
-
-    all_indices = common.get_column(f"idx_{tasks[0]}").to_numpy()
+    """Sample `n` indices from *dataset*."""
+    total = len(dataset)
     np.random.seed(seed)
-    return np.random.choice(all_indices, min(n, len(all_indices)), replace=False)
+    return np.random.choice(total, min(n, total), replace=False)
 
 
 def get_sample_identity(dataset: InferenceDataset, idx: int) -> tuple[int, int]:
@@ -164,14 +133,13 @@ def build_sample_labels(dataset: InferenceDataset, indices: np.ndarray) -> list[
     return labels
 
 
-def get_sample_prompt(dataset: InferenceDataset, idx: int) -> tuple[str, int, list[str]]:
-    """Return (prompt_text, n_input_tokens, stop_tokens) for sample *idx*."""
+def get_sample_prompt(dataset: InferenceDataset, idx: int) -> tuple[str, int]:
+    """Return (prompt_text, n_input_tokens) for sample *idx*."""
     x, _y = dataset[idx]
     input_ids = x["input_ids"]
     tokens = dataset.vocab.decode(input_ids)
     prompt = " ".join(tokens)
-    stop_tokens = [str(s) for s in dataset.stop_tokens]
-    return prompt, len(input_ids), stop_tokens
+    return prompt, len(input_ids)
 
 
 _24H_US = int(timedelta(hours=24) / timedelta(microseconds=1))
@@ -262,51 +230,3 @@ def _format_timedelta(td: timedelta) -> str:
         days = total_days - round(months * 30.44)
         return f"{months}mt {days}d" if days > 0 else f"{months}mt"
     return f"{total_days}d"
-
-
-# ── Probability computation ─────────────────────────────────────────────────
-
-_POSITIVE_OUTCOME: dict[str, tuple[set[str], timedelta | None]] = {
-    "ed_hospitalization": ({"HOSPITAL_ADMISSION"}, timedelta(days=2)),
-    "ed_critical_outcome": ({"ICU_ADMISSION", "MEDS_DEATH"}, timedelta(hours=12)),
-    "icu_admission": ({"ICU_ADMISSION", "MEDS_DEATH"}, None),
-    "icu_mortality": ({"MEDS_DEATH"}, None),
-    "readmission_30d": ({"HOSPITAL_ADMISSION", "MEDS_DEATH"}, timedelta(days=30)),
-    "readmission_90d": ({"HOSPITAL_ADMISSION", "MEDS_DEATH"}, timedelta(days=90)),
-}
-
-
-def compute_task_counts(
-    responses: list[tuple[str, str]],
-    task: str,
-    vocab: Vocabulary,
-) -> tuple[int, int]:
-    """Return (positives, valid) counts from a batch of (generated_text, finish_reason)."""
-    positive_tokens, time_limit = _POSITIVE_OUTCOME[task]
-    positives = 0
-    valid = 0
-
-    for text, finish_reason in responses:
-        generated = text.strip().split()
-        if not generated:
-            continue
-
-        last_token = generated[-1]
-
-        if time_limit is None:
-            if finish_reason != "stop":
-                continue
-            valid += 1
-            if last_token in positive_tokens:
-                positives += 1
-        else:
-            valid += 1
-            if last_token in positive_tokens:
-                try:
-                    token_time = vocab.get_timeline_total_time(generated)
-                except Exception:
-                    token_time = timedelta(0)
-                if token_time <= time_limit:
-                    positives += 1
-
-    return positives, valid

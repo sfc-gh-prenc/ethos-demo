@@ -12,26 +12,19 @@ from ethos_demo.config import (
     DEFAULT_BASE_URL,
     DEFAULT_ETHOS_TEMPERATURE,
     HEALTH_POLL_SECONDS,
-    N_PER_REQUEST,
-    N_REQUESTS,
     N_SAMPLES,
     SAMPLE_SEED,
-    SCENARIO_CONTEXT,
-    SCENARIO_DESCRIPTION,
-    SCENARIO_TASKS,
-    TASK_DISPLAY,
     TOKENIZED_DATASETS_DIR,
-    Scenario,
 )
 from ethos_demo.data import (
     build_sample_labels,
     get_patient_demographics,
     get_sample_context_stats,
-    get_sample_identity,
     load_dataset,
-    sample_common_indices,
+    sample_indices,
 )
 from ethos_demo.estimator import OutcomeEstimator
+from ethos_demo.scenarios import SCENARIOS, Scenario
 from ethos_demo.summarizer import SummaryGenerator
 
 _logger = logging.getLogger("ethos_demo")
@@ -178,19 +171,21 @@ with col_sc:
     scenario = st.selectbox(
         "Scenario",
         options=list(Scenario),
-        format_func=lambda s: SCENARIO_DESCRIPTION[s],
+        format_func=lambda s: SCENARIOS[s].description,
         index=None,
         placeholder="Choose scenario",
     )
 
 selected_label = None
 if dataset_name and scenario:
-    tasks = SCENARIO_TASKS[scenario]
+    sc = SCENARIOS[scenario]
+    tasks = sc.task_names
+    ds_task = sc.dataset
 
     with st.spinner("Loading dataset…"):
-        ds = load_dataset(dataset_name, tasks[0])
+        ds = load_dataset(dataset_name, ds_task)
 
-    indices = sample_common_indices(dataset_name, tasks, N_SAMPLES, SAMPLE_SEED)
+    indices = sample_indices(ds, N_SAMPLES, SAMPLE_SEED)
     labels = build_sample_labels(ds, indices)
 
     label_to_idx = {label: idx for idx, label in labels}
@@ -267,7 +262,7 @@ if dataset_name and scenario:
                         dataset=ds,
                         selected_idx=selected_idx,
                         scenario=scenario,
-                        scenario_context=SCENARIO_CONTEXT.get(scenario, ""),
+                        scenario_context=sc.context,
                         model_id=backend.llm_model,
                         base_url=DEFAULT_BASE_URL,
                         on_status=lambda msg: text_area.markdown(
@@ -311,17 +306,16 @@ if dataset_name and scenario:
                         unsafe_allow_html=True,
                     )
 
-            card_cols = st.columns(len(tasks))
-            for col, t in zip(card_cols, tasks, strict=False):
-                info = TASK_DISPLAY[t]
+            card_cols = st.columns(len(sc.outcomes))
+            for col, rule in zip(card_cols, sc.outcomes, strict=False):
                 with col:
                     st.markdown(
                         f"<div style='text-align:center'>"
-                        f"<span style='font-size:5em'>{info['icon']}</span><br>"
-                        f"<b style='font-size:1.3em'>{info['title']}</b></div>",
+                        f"<span style='font-size:5em'>{rule.icon}</span><br>"
+                        f"<b style='font-size:1.3em'>{rule.title}</b></div>",
                         unsafe_allow_html=True,
                     )
-                    prob = st.session_state.get(f"prob_{t}")
+                    prob = st.session_state.get(f"prob_{rule.name}")
                     if prob is not None:
                         st.markdown(
                             f"<div style='text-align:center;font-size:2em'>{prob:.0%}</div>",
@@ -332,37 +326,35 @@ if dataset_name and scenario:
                             "<div style='text-align:center;font-size:2em;color:gray'>???%</div>",
                             unsafe_allow_html=True,
                         )
-                    if estimating:
-                        prog = st.session_state.get(f"_progress_{t}")
-                        if prog is not None:
-                            completed, total = prog
-                            st.progress(completed / total, text=f"{completed}/{total}")
+
+            if estimating:
+                prog = st.session_state.get("_est_progress")
+                if prog is not None:
+                    completed, total = prog
+                    st.progress(completed / total, text=f"{completed}/{total}")
 
             # ── Start estimation in background thread ──────────────
             if not estimating and run_clicked:
                 for t in tasks:
                     st.session_state.pop(f"prob_{t}", None)
-                    st.session_state.pop(f"_progress_{t}", None)
+                st.session_state.pop("_est_progress", None)
                 st.session_state["_estimating"] = True
                 st.session_state["_cancel_event"] = threading.Event()
 
-                patient_id, prediction_time = get_sample_identity(ds, selected_idx)
                 estimator = OutcomeEstimator(
-                    dataset_name=dataset_name,
-                    patient_id=patient_id,
-                    prediction_time=prediction_time,
-                    tasks=tasks,
+                    dataset=ds,
+                    sample_idx=selected_idx,
+                    scenario=scenario,
                     model_id=backend.ethos_model,
-                    base_url=DEFAULT_BASE_URL,
                     temperature=st.session_state.get(
                         "ethos_temperature", DEFAULT_ETHOS_TEMPERATURE
                     ),
-                    n_requests=N_REQUESTS,
-                    n_per_request=N_PER_REQUEST,
-                    on_progress=lambda tn, c, tot: st.session_state.__setitem__(
-                        f"_progress_{tn}", (c, tot)
+                    on_progress=lambda c, tot: st.session_state.__setitem__(
+                        "_est_progress", (c, tot)
                     ),
-                    on_task_update=lambda tn, p: st.session_state.__setitem__(f"prob_{tn}", p),
+                    on_outcome_update=lambda name, p: st.session_state.__setitem__(
+                        f"prob_{name}", p
+                    ),
                     cancel_event=st.session_state["_cancel_event"],
                 )
 
@@ -373,8 +365,7 @@ if dataset_name and scenario:
                         _logger.exception("Estimation failed")
                     finally:
                         st.session_state["_estimating"] = False
-                        for t_ in tasks:
-                            st.session_state.pop(f"_progress_{t_}", None)
+                        st.session_state.pop("_est_progress", None)
 
                 thread = threading.Thread(target=_bg, daemon=True)
                 add_script_run_ctx(thread, get_script_run_ctx())
@@ -387,8 +378,7 @@ if dataset_name and scenario:
                 if cancel_ev:
                     cancel_ev.set()
                 st.session_state["_estimating"] = False
-                for t in tasks:
-                    st.session_state.pop(f"_progress_{t}", None)
+                st.session_state.pop("_est_progress", None)
                 st.rerun(scope="fragment")
 
         _estimation_fragment()

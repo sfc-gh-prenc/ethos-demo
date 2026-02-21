@@ -1,112 +1,217 @@
-"""Async outcome estimator that fires all requests concurrently."""
+"""Streaming outcome estimator with per-token timeline analysis."""
 
 import asyncio
 import logging
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from dataclasses import dataclass, field
+from datetime import timedelta
 
-from ethos_demo.client import send_raw_completion_async
-from ethos_demo.data import (
-    compute_task_counts,
-    find_sample_idx,
-    get_sample_prompt,
-    load_dataset,
-)
+from ethos.tokenize import InferenceDataset
 
-if TYPE_CHECKING:
-    from ethos.datasets import InferenceDataset
+from ethos_demo.client import stream_completion_async
+from ethos_demo.config import DEFAULT_BASE_URL, MAX_CONCURRENT_STREAMS, N_STREAMS
+from ethos_demo.data import get_sample_prompt
+from ethos_demo.scenarios import SCENARIOS, OutcomeRule, Scenario
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class TaskResult:
-    """Incrementally accumulated outcome counts and probability for a single task."""
+# ── StreamTracker ────────────────────────────────────────────────────────
 
+
+@dataclass
+class StreamTracker:
+    """Token-by-token state machine that resolves multiple outcomes from one stream.
+
+    Accumulates timeline time from TIME_INTERVAL tokens and resolves each outcome as
+    positive/negative based on event tokens and time windows.
+    """
+
+    rules: list[OutcomeRule]
+    interval_estimates: dict[str, float]
+    max_time: timedelta | None
+
+    _buffer: str = field(default="", init=False)
+    _accumulated_us: float = field(default=0.0, init=False)
+    _outcomes: dict[str, bool | None] = field(default_factory=dict, init=False)
+    _done: bool = field(default=False, init=False)
+
+    def __post_init__(self) -> None:
+        self._outcomes = {r.name: None for r in self.rules}
+
+    @property
+    def done(self) -> bool:
+        return self._done
+
+    @property
+    def outcomes(self) -> dict[str, bool]:
+        """Final resolved outcomes (undetermined treated as negative)."""
+        return {name: (val is True) for name, val in self._outcomes.items()}
+
+    @property
+    def accumulated_time(self) -> timedelta:
+        return timedelta(microseconds=self._accumulated_us)
+
+    # ── public API ────────────────────────────────────────────────
+
+    def process_chunk(self, text: str) -> bool:
+        """Feed a text chunk.
+
+        Returns True when the stream should be cancelled.
+        """
+        if self._done:
+            return True
+
+        self._buffer += text
+        tokens = self._buffer.split()
+
+        # Keep the last partial token in the buffer unless text ends with whitespace
+        if text and not text[-1].isspace():
+            self._buffer = tokens.pop() if tokens else ""
+        else:
+            self._buffer = ""
+
+        for token in tokens:
+            self._process_token(token)
+            if self._done:
+                return True
+        return False
+
+    def flush(self) -> None:
+        """Process any remaining partial token when the stream ends."""
+        if self._buffer and not self._done:
+            self._process_token(self._buffer)
+            self._buffer = ""
+        self._finalize()
+
+    # ── internal ──────────────────────────────────────────────────
+
+    def _process_token(self, token: str) -> None:
+        if token in self.interval_estimates:
+            self._accumulated_us += self.interval_estimates[token]
+
+        for rule in self.rules:
+            if self._outcomes[rule.name] is not None:
+                continue
+            if token in rule.positive_events and (
+                rule.time_window is None or self.accumulated_time <= rule.time_window
+            ):
+                self._outcomes[rule.name] = True
+
+        # Resolve outcomes whose time window has been exceeded
+        for rule in self.rules:
+            if self._outcomes[rule.name] is not None:
+                continue
+            if rule.time_window is not None and self.accumulated_time > rule.time_window:
+                self._outcomes[rule.name] = False
+
+        # Check if max time exceeded
+        if self.max_time is not None and self.accumulated_time > self.max_time:
+            self._finalize()
+            return
+
+        if all(v is not None for v in self._outcomes.values()):
+            self._done = True
+
+    def _finalize(self) -> None:
+        """Mark all undetermined outcomes as negative and set done."""
+        for name, val in self._outcomes.items():
+            if val is None:
+                self._outcomes[name] = False
+        self._done = True
+
+
+# ── OutcomeEstimator ─────────────────────────────────────────────────────
+
+
+@dataclass
+class _AggResult:
     positives: int = 0
     valid: int = 0
 
     @property
     def probability(self) -> float | None:
-        if self.valid == 0:
-            return None
-        return self.positives / self.valid
-
-    def update(self, batch_positives: int, batch_valid: int) -> None:
-        self.positives += batch_positives
-        self.valid += batch_valid
+        return self.positives / self.valid if self.valid else None
 
 
 class OutcomeEstimator:
-    """Fire N concurrent requests per task and report progress via callbacks."""
+    """Fire N concurrent streaming completions and derive outcome probabilities."""
 
     def __init__(
         self,
         *,
-        dataset_name: str,
-        patient_id: int,
-        prediction_time: int,
-        tasks: list[str],
+        dataset: InferenceDataset,
+        sample_idx: int,
+        scenario: Scenario,
         model_id: str,
-        base_url: str,
+        base_url: str = DEFAULT_BASE_URL,
         temperature: float = 1.0,
-        n_requests: int = 10,
-        n_per_request: int = 10,
+        n_streams: int = N_STREAMS,
+        max_concurrent: int = MAX_CONCURRENT_STREAMS,
         on_progress: Callable[[int, int], None] | None = None,
-        on_task_update: Callable[[str, float], None] | None = None,
+        on_outcome_update: Callable[[str, float], None] | None = None,
         cancel_event: threading.Event | None = None,
     ) -> None:
-        self.dataset_name = dataset_name
-        self.patient_id = patient_id
-        self.prediction_time = prediction_time
-        self.tasks = tasks
+        self.dataset = dataset
+        self.sample_idx = sample_idx
+        self.scenario = scenario
         self.model_id = model_id
         self.base_url = base_url
         self.temperature = temperature
-        self.n_requests = n_requests
-        self.n_per_request = n_per_request
+        self.n_streams = n_streams
+        self.max_concurrent = max_concurrent
         self.on_progress = on_progress
-        self.on_task_update = on_task_update
+        self.on_outcome_update = on_outcome_update
         self.cancel_event = cancel_event
         self.cancelled = False
 
-        self._task_data: dict[str, tuple[InferenceDataset, str, int, list[str]]] = {}
-        self.results: dict[str, TaskResult] = {t: TaskResult() for t in tasks}
-        self._task_completed: dict[str, int] = dict.fromkeys(tasks, 0)
+        sc = SCENARIOS[scenario]
+        self._rules = sc.outcomes
+        self._outcome_names = [r.name for r in self._rules]
+        self._max_time = self._derive_max_time()
+        self._stop_tokens = list(sc.stop_tokens)
+        self._interval_estimates: dict[str, float] = dataset.vocab.interval_estimates.get(
+            "mean", {}
+        )
 
-    def _prepare(self) -> None:
-        """Load datasets, resolve per-task sample index, and extract prompts."""
-        for t in self.tasks:
-            ds = load_dataset(self.dataset_name, t)
-            idx = find_sample_idx(ds, self.patient_id, self.prediction_time)
-            prompt, n_input_tokens, stop_tokens = get_sample_prompt(ds, idx)
-            self._task_data[t] = (ds, prompt, n_input_tokens, stop_tokens)
+        self._prompt, self._n_input_tokens = get_sample_prompt(dataset, sample_idx)
 
-    async def _send_one(
-        self, task_name: str, sem: asyncio.Semaphore
-    ) -> tuple[str, list[tuple[str, str]]]:
+        self.results: dict[str, _AggResult] = {name: _AggResult() for name in self._outcome_names}
+
+    def _derive_max_time(self) -> timedelta | None:
+        windows = [r.time_window for r in self._rules if r.time_window is not None]
+        return max(windows) if windows else None
+
+    # ── single stream ─────────────────────────────────────────────
+
+    async def _stream_one(self, sem: asyncio.Semaphore) -> StreamTracker:
+        tracker = StreamTracker(
+            rules=self._rules,
+            interval_estimates=self._interval_estimates,
+            max_time=self._max_time,
+        )
         async with sem:
-            _ds, prompt, n_tok, stops = self._task_data[task_name]
-            batch = await send_raw_completion_async(
-                prompt,
-                n_input_tokens=n_tok,
+            stream = stream_completion_async(
+                self._prompt,
+                n_input_tokens=self._n_input_tokens,
                 model=self.model_id,
                 base_url=self.base_url,
-                n=self.n_per_request,
-                stop=stops,
+                stop=self._stop_tokens,
                 temperature=self.temperature,
             )
-            return task_name, batch
+            async for chunk in stream:
+                if tracker.process_chunk(chunk):
+                    break
+
+        tracker.flush()
+        return tracker
+
+    # ── main loop ─────────────────────────────────────────────────
 
     async def _run(self) -> None:
-        sem = asyncio.Semaphore(20)
-        futures = [
-            asyncio.ensure_future(self._send_one(t, sem))
-            for _ in range(self.n_requests)
-            for t in self.tasks
-        ]
+        sem = asyncio.Semaphore(self.max_concurrent)
+        futures = [asyncio.ensure_future(self._stream_one(sem)) for _ in range(self.n_streams)]
         total = len(futures)
         pending = set(futures)
         completed = 0
@@ -120,41 +225,38 @@ class OutcomeEstimator:
                 break
 
             done, pending = await asyncio.wait(
-                pending,
-                timeout=0.2,
-                return_when=asyncio.FIRST_COMPLETED,
+                pending, timeout=0.2, return_when=asyncio.FIRST_COMPLETED
             )
             for future in done:
-                task_name, batch = future.result()
+                try:
+                    tracker = future.result()
+                except Exception:
+                    logger.debug("Stream failed", exc_info=True)
+                    completed += 1
+                    continue
+
                 completed += 1
+                outcomes = tracker.outcomes
 
-                ds = self._task_data[task_name][0]
-                batch_pos, batch_valid = compute_task_counts(batch, task_name, ds.vocab)
+                for name, positive in outcomes.items():
+                    agg = self.results[name]
+                    agg.valid += 1
+                    if positive:
+                        agg.positives += 1
+                    if self.on_outcome_update and agg.probability is not None:
+                        self.on_outcome_update(name, agg.probability)
 
-                result = self.results[task_name]
-                result.update(batch_pos, batch_valid)
+                if self.on_progress:
+                    self.on_progress(completed, total)
 
                 logger.debug(
-                    "[%s] batch %d/%d — pos=%d valid=%d (cumul pos=%d valid=%d prob=%.2f%%)",
-                    task_name,
+                    "stream %d/%d — %s",
                     completed,
                     total,
-                    batch_pos,
-                    batch_valid,
-                    result.positives,
-                    result.valid,
-                    (result.probability or 0) * 100,
+                    {n: f"{r.probability or 0:.1%}" for n, r in self.results.items()},
                 )
 
-                self._task_completed[task_name] += 1
-                if self.on_progress:
-                    self.on_progress(task_name, self._task_completed[task_name], self.n_requests)
-
-                if self.on_task_update and result.probability is not None:
-                    self.on_task_update(task_name, result.probability)
-
-    def run(self) -> dict[str, TaskResult]:
-        """Prepare data, fire all requests, and return results."""
-        self._prepare()
+    def run(self) -> dict[str, _AggResult]:
+        """Fire all streams and return results."""
         asyncio.run(self._run())
         return self.results
