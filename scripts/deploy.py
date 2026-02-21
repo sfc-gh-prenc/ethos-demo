@@ -12,7 +12,7 @@ import torch
 from ray import serve
 from ray.serve.llm import LLMConfig, build_openai_app
 
-DEEPSEEK_GPUS = 2
+LLM_GPUS = 2
 
 
 def main():
@@ -26,25 +26,25 @@ def main():
     args = parser.parse_args()
 
     total_gpus = torch.cuda.device_count()
-    remaining_gpus = total_gpus - DEEPSEEK_GPUS
+    remaining_gpus = total_gpus - LLM_GPUS
 
     if remaining_gpus < 1:
         raise RuntimeError(
-            f"Need at least {DEEPSEEK_GPUS + 1} GPUs (found {total_gpus}): "
-            f"{DEEPSEEK_GPUS} for deepseek + at least 1 for ethos"
+            f"Need at least {LLM_GPUS + 1} GPUs (found {total_gpus}): "
+            f"{LLM_GPUS} for deepseek + at least 1 for ethos"
         )
 
-    # Each ethos replica uses 1 GPU; spawn as many replicas as remaining GPUs
+    # One ethos replica per remaining GPU
     ethos_replicas = remaining_gpus
 
     deepseek_config = LLMConfig(
         model_loading_config={
-            "model_id": "deepseek",
-            "model_source": "deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
+            "model_id": "llama-3.1",
+            "model_source": "meta-llama/Llama-3.1-70B-Instruct",
         },
         deployment_config={"num_replicas": 1},
         engine_kwargs={
-            "tensor_parallel_size": DEEPSEEK_GPUS,
+            "tensor_parallel_size": LLM_GPUS,
             "gpu_memory_utilization": args.gpu_memory_utilization,
         },
     )
