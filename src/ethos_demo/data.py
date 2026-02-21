@@ -1,5 +1,6 @@
 """Dataset loading and patient-level helpers for the ETHOS Demo app."""
 
+import json
 import logging
 from collections import Counter
 from datetime import UTC, datetime, timedelta
@@ -95,6 +96,48 @@ def get_patient_demographics(dataset: InferenceDataset, idx: int) -> dict[str, s
 def _find_idx_of_last_le(times: list[datetime], value: datetime) -> int:
     indices = [i for i, t in enumerate(times) if t <= value]
     return indices[-1] if indices else -1
+
+
+@st.cache_resource
+def _load_bmi_quantiles(dataset_name: str) -> list[float] | None:
+    """Load BMI quantile breaks (including min/max) from quantiles.json."""
+    qf = TOKENIZED_DATASETS_DIR / dataset_name / "test" / "quantiles.json"
+    if not qf.is_file():
+        return None
+    with qf.open() as f:
+        data = json.load(f)
+    for key in ("BMI//Q", "VITAL//BMI"):
+        if key in data:
+            return data[key]
+    return None
+
+
+def get_patient_bmi_group(dataset: InferenceDataset, idx: int, dataset_name: str) -> str:
+    """Return BMI group label for sample *idx*, e.g. '23-25 (D3)'."""
+    start_idx = dataset.start_indices[idx].item()
+    timeline_start_idx = dataset.patient_offset_at_idx[start_idx].item()
+    if start_idx - timeline_start_idx + 1 > dataset.timeline_size:
+        timeline_start_idx = start_idx + 1 - dataset.timeline_size
+
+    tokens = dataset.tokens[timeline_start_idx : start_idx + 1]
+    decoded = dataset.vocab.decode(tokens)
+
+    q_num = None
+    for token in reversed(decoded):
+        if token and "BMI" in token and "QUANTILE" in token:
+            q_num = int(token.rsplit("//", 1)[-1])
+            break
+
+    if q_num is None:
+        return "???"
+
+    breaks = _load_bmi_quantiles(dataset_name)
+    if breaks is None or q_num < 1 or q_num > len(breaks) - 1:
+        return f"D{q_num}"
+
+    lo = round(breaks[q_num - 1])
+    hi = round(breaks[q_num])
+    return f"{lo}-{hi} (D{q_num})"
 
 
 def get_admission_order(dataset: InferenceDataset, idx: int) -> int:

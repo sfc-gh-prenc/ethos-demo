@@ -16,6 +16,7 @@ from ethos_demo.config import (
 )
 from ethos_demo.data import (
     build_sample_labels,
+    get_patient_bmi_group,
     get_patient_demographics,
     get_sample_context_stats,
     load_dataset,
@@ -259,7 +260,10 @@ if dataset_name and scenario:
             )
 
         # ── Demographics ──────────────────────────────────────────
-        demographics = get_patient_demographics(ds, selected_idx)
+        raw_demo = get_patient_demographics(ds, selected_idx)
+        raw_demo["BMI"] = get_patient_bmi_group(ds, selected_idx, dataset_name)
+        _DEMO_ORDER = ["Gender", "Race", "Age", "BMI", "Marital Status"]
+        demographics = {k: raw_demo.get(k, "???") for k in _DEMO_ORDER}
 
         st.subheader("Demographics")
         demo_cols = st.columns(len(demographics))
@@ -294,8 +298,8 @@ if dataset_name and scenario:
             "<span style='font-size:1.1em;color:gray'>Summary not available.</span></div>"
         )
 
-        @st.fragment(run_every=timedelta(milliseconds=500))
-        def _summary_fragment():
+        @st.fragment(run_every=timedelta(milliseconds=200))
+        def _summary_fragment_fast():
             gen: SummaryGenerator | None = st.session_state.get("_summarizer")
             if gen is not None and (gen.text or gen.status):
                 msg = gen.text or gen.status
@@ -305,7 +309,22 @@ if dataset_name and scenario:
             else:
                 st.markdown(_summary_box.format(msg=""), unsafe_allow_html=True)
 
-        _summary_fragment()
+        @st.fragment(run_every=timedelta(seconds=2))
+        def _summary_fragment_idle():
+            gen: SummaryGenerator | None = st.session_state.get("_summarizer")
+            if gen is not None and (gen.text or gen.status):
+                msg = gen.text or gen.status
+                st.markdown(_summary_box.format(msg=msg), unsafe_allow_html=True)
+            elif not backend.has_llm_model:
+                st.markdown(_summary_unavailable, unsafe_allow_html=True)
+            else:
+                st.markdown(_summary_box.format(msg=""), unsafe_allow_html=True)
+
+        summarizer = st.session_state.get("_summarizer")
+        if summarizer is not None and summarizer.running:
+            _summary_fragment_fast()
+        else:
+            _summary_fragment_idle()
 
         # ── Outcome estimation ────────────────────────────────────
         st.divider()
