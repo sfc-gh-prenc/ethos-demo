@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
 
-from ethos.tokenize import InferenceDataset
+from ethos.datasets import InferenceDataset
 
 from ethos_demo.client import stream_completion_async
 from ethos_demo.config import DEFAULT_BASE_URL, MAX_CONCURRENT_STREAMS, N_STREAMS

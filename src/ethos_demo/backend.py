@@ -71,11 +71,19 @@ class BackendMonitor:
         """Request a manual health check on the next fragment tick."""
         st.session_state[self._KEY_LOADING] = True
 
+    @property
+    def busy(self) -> bool:
+        """True when backend requests are in-flight (estimation, etc.)."""
+        return bool(st.session_state.get("_estimating"))
+
     def poll(self) -> BackendEvent:
         """Run one health-check cycle and return what happened.
 
         Call this from inside a ``@st.fragment(run_every=…)`` function.
         """
+        if self.busy:
+            return BackendEvent.UNCHANGED
+
         loading = st.session_state.pop(self._KEY_LOADING, False)
         was_healthy = st.session_state.get(self._KEY_HEALTHY, None)
 
