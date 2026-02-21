@@ -11,7 +11,7 @@ from ethos_demo.backend import BackendEvent, BackendMonitor
 from ethos_demo.config import (
     DEFAULT_BASE_URL,
     DEFAULT_ETHOS_TEMPERATURE,
-    HEALTH_POLL_SECONDS,
+    HEALTH_RETRY_SECONDS,
     N_SAMPLES,
     SAMPLE_SEED,
     TOKENIZED_DATASETS_DIR,
@@ -48,8 +48,6 @@ _GLOBAL_CSS = (
     ".st-key-sidebar_bottom button"
     "{padding:0!important;min-height:0!important}"
     ".st-key-ai_working_bar span[data-testid='stIconMaterial']"
-    "{animation:_spin .7s linear infinite}"
-    ".st-key-health_loading span[data-testid='stIconMaterial']"
     "{animation:_spin .7s linear infinite}"
 )
 st.markdown(f"<style>{_GLOBAL_CSS}</style>", unsafe_allow_html=True)
@@ -95,41 +93,15 @@ with st.sidebar:
                 key="_ai_working_label",
             )
 
-    # ── ETHOS health status (polls every HEALTH_POLL_SECONDS) ─
-    @st.fragment(run_every=timedelta(seconds=HEALTH_POLL_SECONDS))
+    # ── ETHOS health status ───────────────────────────────────
+    @st.fragment(run_every=timedelta(seconds=HEALTH_RETRY_SECONDS))
     def _health_status_fragment():
         event = backend.poll()
-
-        if event is BackendEvent.CHECKING:
-            status_col, btn_col = st.columns([3, 1])
-            with status_col:
-                st.markdown(_status_html("err", "Checking…"), unsafe_allow_html=True)
-            with btn_col, st.container(key="health_loading"):
-                st.button(
-                    "",
-                    icon=":material/progress_activity:",
-                    key="refresh_health",
-                    type="tertiary",
-                )
-            return
-
         dot_cls = "ok" if backend.healthy else "err"
         label = "Connected" if backend.healthy else "Unreachable"
-
-        if not backend.healthy:
-            status_col, btn_col = st.columns([3, 1])
-            with status_col:
-                st.markdown(_status_html(dot_cls, label), unsafe_allow_html=True)
-            with btn_col:
-                st.button(
-                    "",
-                    icon=":material/refresh:",
-                    key="refresh_health",
-                    type="tertiary",
-                    on_click=backend.request_check,
-                )
-        else:
-            st.markdown(_status_html(dot_cls, label), unsafe_allow_html=True)
+        st.markdown(_status_html(dot_cls, label), unsafe_allow_html=True)
+        if event != BackendEvent.UNCHANGED:
+            st.rerun()
 
     with st.container(key="sidebar_bottom"):
         _ai_working_fragment()
@@ -286,6 +258,7 @@ if dataset_name and scenario:
             if est_ev is not None:
                 est_ev.set()
             st.session_state["_estimating"] = False
+            st.session_state["_est_thread_alive"] = False
             st.session_state.pop("_est_progress", None)
             for t in tasks:
                 st.session_state.pop(f"prob_{t}", None)
@@ -345,8 +318,7 @@ if dataset_name and scenario:
         _summary_unavailable = (
             "<div style='min-height:120px'>"
             "<span style='color:gray'>EHR Summary</span><br>"
-            "<span style='font-size:1.1em;color:gray'>Summary not available — "
-            "select an LLM Provider</span></div>"
+            "<span style='font-size:1.1em;color:gray'>Summary not available.</span></div>"
         )
 
         @st.fragment(run_every=timedelta(milliseconds=500))
@@ -372,18 +344,39 @@ if dataset_name and scenario:
             has_model = backend.has_ethos_model
 
             # ── Button row ────────────────────────────────────
+            prog = st.session_state.get("_est_progress")
             btn_col, _spacer = st.columns([1, 3])
-            with btn_col:
+            with btn_col, st.container(key="est_btn"):
                 if estimating:
-                    cancel_clicked = st.button("Cancel", use_container_width=True)
+                    pct = int(100 * prog[0] / prog[1]) if prog else 0
+                    cancel_clicked = st.button(
+                        f"Cancel · {pct}%",
+                        key="est_action_btn",
+                        use_container_width=True,
+                    )
                     run_clicked = False
                 else:
+                    pct = 0
                     cancel_clicked = False
                     run_clicked = st.button(
                         "Estimate Outcomes",
+                        key="est_action_btn",
                         disabled=not has_model,
                         use_container_width=True,
                     )
+                _fill = (
+                    f"background-image:linear-gradient(to right,"
+                    f"rgba(255,255,255,0.10) {pct}%,"
+                    f"transparent {pct}%)!important;"
+                    if pct
+                    else ""
+                )
+                st.markdown(
+                    f"<style>.st-key-est_btn button{{"
+                    f"background-color:rgba(255,255,255,0.06)!important;"
+                    f"{_fill}}}</style>",
+                    unsafe_allow_html=True,
+                )
 
             # ── Outcome cards ─────────────────────────────────
             card_cols = st.columns(len(sc.outcomes))
@@ -407,13 +400,6 @@ if dataset_name and scenario:
                             unsafe_allow_html=True,
                         )
 
-            # ── Progress bar ──────────────────────────────────
-            if estimating:
-                prog = st.session_state.get("_est_progress")
-                if prog is not None:
-                    completed, total = prog
-                    st.progress(completed / total, text=f"{completed}/{total}")
-
             # ── Start estimation ──────────────────────────────
             if not estimating and run_clicked:
                 for t_name in tasks:
@@ -421,10 +407,12 @@ if dataset_name and scenario:
                 st.session_state.pop("_est_progress", None)
                 st.session_state["_estimating"] = True
                 st.session_state["_ai_working"] = True
+                st.session_state["_est_cancel_event"] = threading.Event()
+                st.rerun(scope="fragment")
 
-                est_cancel = threading.Event()
-                st.session_state["_est_cancel_event"] = est_cancel
-
+            # ── Launch estimation (deferred from button click) ──
+            if estimating and not st.session_state.get("_est_thread_alive"):
+                est_cancel = st.session_state.get("_est_cancel_event")
                 estimator = OutcomeEstimator(
                     dataset=ds,
                     sample_idx=selected_idx,
@@ -449,14 +437,15 @@ if dataset_name and scenario:
                         _logger.exception("Estimation failed")
                     finally:
                         st.session_state["_estimating"] = False
+                        st.session_state["_est_thread_alive"] = False
                         st.session_state.pop("_est_progress", None)
                         if not st.session_state.get("_ai_working_summary"):
                             st.session_state["_ai_working"] = False
 
+                st.session_state["_est_thread_alive"] = True
                 thread = threading.Thread(target=_est_bg, daemon=True)
                 add_script_run_ctx(thread, get_script_run_ctx())
                 thread.start()
-                st.rerun(scope="fragment")
 
             # ── Cancel estimation ─────────────────────────────
             if estimating and cancel_clicked:
@@ -464,9 +453,10 @@ if dataset_name and scenario:
                 if ev:
                     ev.set()
                 st.session_state["_estimating"] = False
+                st.session_state["_est_thread_alive"] = False
                 st.session_state.pop("_est_progress", None)
-                if not st.session_state.get("_ai_working_summary"):
-                    st.session_state["_ai_working"] = False
+                st.session_state["_ai_working"] = False
+                st.session_state.pop("_ai_working_summary", None)
                 st.rerun(scope="fragment")
 
         _outcomes_fragment()

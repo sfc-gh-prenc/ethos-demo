@@ -29,8 +29,8 @@ class SummaryGenerator:
 
     _STAGES: ClassVar[list[tuple[str, float]]] = [
         ("Pulling records…", 2.0),
-        ("Reading…", 2.0),
-        ("Thinking…", 0.0),
+        ("Reading…", 1.5),
+        ("Summarizing…", 0.0),
     ]
 
     _HISTORY_FN: ClassVar[dict] = {
@@ -51,7 +51,7 @@ class SummaryGenerator:
         on_status: Callable[[str], None] | None = None,
         on_chunk: Callable[[str], None] | None = None,
         cancel_event: threading.Event | None = None,
-        enable_thinking: bool = True,
+        enable_thinking: bool = False,
     ) -> None:
         self.dataset = dataset
         self.selected_idx = selected_idx
@@ -96,12 +96,13 @@ class SummaryGenerator:
         """
         messages = self._build_messages()
 
+        time_scale = 1.0 if self.enable_thinking else 0.2
         for label, duration in self._STAGES:
             if self._cancelled():
                 return None
             if self.on_status:
                 self.on_status(label)
-            time.sleep(duration)
+            time.sleep(duration * time_scale)
 
         if self._cancelled():
             return None
