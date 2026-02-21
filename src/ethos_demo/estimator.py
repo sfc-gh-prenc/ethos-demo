@@ -150,7 +150,7 @@ class OutcomeEstimator:
         n_requests: int = N_STREAMS,
         max_concurrent: int = MAX_CONCURRENT_STREAMS,
         on_progress: Callable[[int, int], None] | None = None,
-        on_outcome_update: Callable[[str, float], None] | None = None,
+        on_outcome_update: Callable[[str, float, int, int], None] | None = None,
         cancel_event: threading.Event | None = None,
     ) -> None:
         self.dataset = dataset
@@ -255,19 +255,25 @@ class OutcomeEstimator:
                         and self.on_outcome_update
                         and agg.probability is not None
                     ):
-                        self.on_outcome_update(name, agg.probability)
+                        self.on_outcome_update(name, agg.probability, agg.positives, agg.valid)
 
                 if not self._is_cancelled() and self.on_progress:
                     self.on_progress(completed, total)
 
-                logger.debug(
-                    "request %d/%d — %s",
-                    completed,
-                    total,
-                    {n: f"{r.probability or 0:.1%}" for n, r in self.results.items()},
-                )
-
     def run(self) -> dict[str, _AggResult]:
         """Fire all requests and return results."""
         asyncio.run(self._run())
+        n = self.n_requests
+        logger.debug(
+            "estimation done — %s",
+            {
+                name: {
+                    "valid": agg.valid,
+                    "requested": n,
+                    "yield": f"{100 * agg.valid / n:.1f}%" if n else "n/a",
+                    "prob": f"{agg.probability:.1%}" if agg.probability is not None else "n/a",
+                }
+                for name, agg in self.results.items()
+            },
+        )
         return self.results

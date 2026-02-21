@@ -26,6 +26,7 @@ from ethos_demo.data import (
 from ethos_demo.estimator import OutcomeEstimator
 from ethos_demo.scenarios import SCENARIOS, Scenario
 from ethos_demo.summarizer import SummaryGenerator
+from ethos_demo.utils import wilson_margin
 
 _logger = logging.getLogger("ethos_demo")
 _logger.setLevel(logging.DEBUG)
@@ -34,6 +35,7 @@ if not _logger.handlers:
     _handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(message)s"))
     _logger.addHandler(_handler)
 _logger.propagate = False
+
 
 st.set_page_config(page_title="ETHOS Demo", layout="wide")
 
@@ -388,10 +390,18 @@ if dataset_name and scenario:
                         f"<b style='font-size:1.3em'>{rule.title}</b></div>",
                         unsafe_allow_html=True,
                     )
-                    prob = st.session_state.get(f"prob_{rule.name}")
-                    if prob is not None:
+                    entry = st.session_state.get(f"prob_{rule.name}")
+                    if entry is not None:
+                        prob, k, n = entry
+                        margin = wilson_margin(k, n)
                         st.markdown(
-                            f"<div style='text-align:center;font-size:2em'>{prob:.0%}</div>",
+                            f"<div style='text-align:center;font-size:2em'>"
+                            f"{prob:.0%}"
+                            f"<span style='display:inline-block;width:0;"
+                            f"overflow:visible;vertical-align:baseline'>"
+                            f"<span style='font-size:0.42em;color:gray;"
+                            f"margin-left:4px;white-space:nowrap'>"
+                            f"±{margin * 100:.1f}%</span></span></div>",
                             unsafe_allow_html=True,
                         )
                     else:
@@ -399,6 +409,18 @@ if dataset_name and scenario:
                             "<div style='text-align:center;font-size:2em;color:gray'>???</div>",
                             unsafe_allow_html=True,
                         )
+
+            if estimating and prog:
+                _logger.debug(
+                    "estimation %d/%d — %s",
+                    prog[0],
+                    prog[1],
+                    {
+                        r.name: f"{e[0]:.1%} ({e[1]}/{e[2]})"
+                        for r in sc.outcomes
+                        if (e := st.session_state.get(f"prob_{r.name}"))
+                    },
+                )
 
             # ── Start estimation ──────────────────────────────
             if not estimating and run_clicked:
@@ -424,8 +446,8 @@ if dataset_name and scenario:
                     on_progress=lambda c, tot: st.session_state.__setitem__(
                         "_est_progress", (c, tot)
                     ),
-                    on_outcome_update=lambda name, p: st.session_state.__setitem__(
-                        f"prob_{name}", p
+                    on_outcome_update=lambda name, p, k, n: st.session_state.__setitem__(
+                        f"prob_{name}", (p, k, n)
                     ),
                     cancel_event=est_cancel,
                 )
