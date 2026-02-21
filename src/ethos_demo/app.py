@@ -299,7 +299,7 @@ if dataset_name and scenario:
         )
 
         @st.fragment(run_every=timedelta(milliseconds=200))
-        def _summary_fragment_fast():
+        def _summary_fragment():
             gen: SummaryGenerator | None = st.session_state.get("_summarizer")
             if gen is not None and (gen.text or gen.status):
                 msg = gen.text or gen.status
@@ -309,22 +309,7 @@ if dataset_name and scenario:
             else:
                 st.markdown(_summary_box.format(msg=""), unsafe_allow_html=True)
 
-        @st.fragment(run_every=timedelta(seconds=2))
-        def _summary_fragment_idle():
-            gen: SummaryGenerator | None = st.session_state.get("_summarizer")
-            if gen is not None and (gen.text or gen.status):
-                msg = gen.text or gen.status
-                st.markdown(_summary_box.format(msg=msg), unsafe_allow_html=True)
-            elif not backend.has_llm_model:
-                st.markdown(_summary_unavailable, unsafe_allow_html=True)
-            else:
-                st.markdown(_summary_box.format(msg=""), unsafe_allow_html=True)
-
-        summarizer = st.session_state.get("_summarizer")
-        if summarizer is not None and summarizer.running:
-            _summary_fragment_fast()
-        else:
-            _summary_fragment_idle()
+        _summary_fragment()
 
         # ── Outcome estimation ────────────────────────────────────
         st.divider()
