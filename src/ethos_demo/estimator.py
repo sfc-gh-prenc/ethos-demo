@@ -3,11 +3,11 @@
 import asyncio
 import logging
 import threading
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
 
 from ethos.datasets import InferenceDataset
+from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
 
 from ethos_demo.client import send_raw_completion_async
 from ethos_demo.config import DEFAULT_BASE_URL, MAX_CONCURRENT_STREAMS, N_STREAMS
@@ -136,7 +136,12 @@ class _AggResult:
 
 
 class OutcomeEstimator:
-    """Fire N concurrent completions and derive outcome probabilities."""
+    """Fire N concurrent completions and derive outcome probabilities.
+
+    Designed to be stored in session state. The UI reads ``running``,
+    ``progress``, ``probabilities``, and ``log_summary`` at render time
+    instead of relying on callbacks.
+    """
 
     def __init__(
         self,
@@ -149,9 +154,6 @@ class OutcomeEstimator:
         temperature: float = 1.0,
         n_requests: int = N_STREAMS,
         max_concurrent: int = MAX_CONCURRENT_STREAMS,
-        on_progress: Callable[[int, int], None] | None = None,
-        on_outcome_update: Callable[[str, float, int, int], None] | None = None,
-        cancel_event: threading.Event | None = None,
     ) -> None:
         self.dataset = dataset
         self.sample_idx = sample_idx
@@ -161,10 +163,6 @@ class OutcomeEstimator:
         self.temperature = temperature
         self.n_requests = n_requests
         self.max_concurrent = max_concurrent
-        self.on_progress = on_progress
-        self.on_outcome_update = on_outcome_update
-        self.cancel_event = cancel_event
-        self.cancelled = False
 
         sc = SCENARIOS[scenario]
         self._rules = sc.outcomes
@@ -177,16 +175,81 @@ class OutcomeEstimator:
 
         self._prompt, self._n_input_tokens = get_sample_prompt(dataset, sample_idx)
 
-        self.results: dict[str, _AggResult] = {name: _AggResult() for name in self._outcome_names}
+        self._results: dict[str, _AggResult] = {name: _AggResult() for name in self._outcome_names}
+        self._completed = 0
+        self._cancel_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    # ── public properties (read at render time) ────────────────────
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def progress(self) -> tuple[int, int] | None:
+        if self._completed == 0:
+            return None
+        return (self._completed, self.n_requests)
+
+    @property
+    def probabilities(self) -> dict[str, tuple[float, int, int] | None]:
+        """Per-outcome ``(probability, positives, valid)`` or None."""
+        out: dict[str, tuple[float, int, int] | None] = {}
+        for name, agg in self._results.items():
+            if agg.probability is not None:
+                out[name] = (agg.probability, agg.positives, agg.valid)
+            else:
+                out[name] = None
+        return out
+
+    @property
+    def log_summary(self) -> dict:
+        done = self._completed
+        return {
+            name: {
+                "processed": done,
+                "valid": agg.valid,
+                "yield": f"{100 * agg.valid / done:.1f}%" if done else "n/a",
+                "prob": f"{agg.probability:.1%}" if agg.probability is not None else "n/a",
+            }
+            for name, agg in self._results.items()
+        }
+
+    # ── lifecycle ──────────────────────────────────────────────────
+
+    def start(self) -> None:
+        """Launch the estimation in a background thread."""
+        if self._thread is not None:
+            return
+
+        def _run_wrapper() -> None:
+            try:
+                asyncio.run(self._run())
+            except Exception:
+                logger.exception("Estimation failed")
+            finally:
+                logger.debug("estimation done — %s", self.log_summary)
+
+        self._thread = threading.Thread(target=_run_wrapper, daemon=True)
+        add_script_run_ctx(self._thread, get_script_run_ctx())
+        self._thread.start()
+
+    def cancel(self) -> None:
+        """Signal cancellation.
+
+        Safe to call multiple times or on a finished estimator.
+        """
+        self._cancel_event.set()
+
+    # ── internals ──────────────────────────────────────────────────
 
     def _derive_max_time(self) -> timedelta | None:
         windows = [r.time_window for r in self._rules if r.time_window is not None]
         return max(windows) if windows else None
 
     def _is_cancelled(self) -> bool:
-        return self.cancel_event is not None and self.cancel_event.is_set()
-
-    # ── single request ────────────────────────────────────────────
+        return self._cancel_event.is_set()
 
     async def _request_one(self, sem: asyncio.Semaphore) -> StreamTracker:
         tracker = StreamTracker(
@@ -213,21 +276,20 @@ class OutcomeEstimator:
         tracker.flush()
         return tracker
 
-    # ── main loop ─────────────────────────────────────────────────
-
     async def _run(self) -> None:
         sem = asyncio.Semaphore(self.max_concurrent)
         futures = [asyncio.ensure_future(self._request_one(sem)) for _ in range(self.n_requests)]
-        total = len(futures)
         pending = set(futures)
-        completed = 0
 
         while pending:
             if self._is_cancelled():
                 for f in pending:
                     f.cancel()
-                self.cancelled = True
-                logger.debug("Estimation cancelled — %d/%d completed", completed, total)
+                logger.debug(
+                    "Estimation cancelled — %d/%d completed",
+                    self._completed,
+                    self.n_requests,
+                )
                 await asyncio.gather(*pending, return_exceptions=True)
                 break
 
@@ -239,41 +301,12 @@ class OutcomeEstimator:
                     tracker = future.result()
                 except Exception:
                     logger.debug("Request failed", exc_info=True)
-                    completed += 1
+                    self._completed += 1
                     continue
 
-                completed += 1
-                outcomes = tracker.outcomes
-
-                for name, positive in outcomes.items():
-                    agg = self.results[name]
+                self._completed += 1
+                for name, positive in tracker.outcomes.items():
+                    agg = self._results[name]
                     agg.valid += 1
                     if positive:
                         agg.positives += 1
-                    if (
-                        not self._is_cancelled()
-                        and self.on_outcome_update
-                        and agg.probability is not None
-                    ):
-                        self.on_outcome_update(name, agg.probability, agg.positives, agg.valid)
-
-                if not self._is_cancelled() and self.on_progress:
-                    self.on_progress(completed, total)
-
-    def run(self) -> dict[str, _AggResult]:
-        """Fire all requests and return results."""
-        asyncio.run(self._run())
-        n = self.n_requests
-        logger.debug(
-            "estimation done — %s",
-            {
-                name: {
-                    "valid": agg.valid,
-                    "requested": n,
-                    "yield": f"{100 * agg.valid / n:.1f}%" if n else "n/a",
-                    "prob": f"{agg.probability:.1%}" if agg.probability is not None else "n/a",
-                }
-                for name, agg in self.results.items()
-            },
-        )
-        return self.results

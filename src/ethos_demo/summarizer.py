@@ -3,10 +3,10 @@
 import logging
 import threading
 import time
-from collections.abc import Callable
 from typing import TYPE_CHECKING, ClassVar
 
 import yaml
+from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
 
 from ethos_demo.client import stream_chat_completion
 from ethos_demo.config import DEFAULT_BASE_URL, PROMPTS_DIR
@@ -25,7 +25,11 @@ if TYPE_CHECKING:
 
 
 class SummaryGenerator:
-    """Build an LLM prompt from patient data, stream the response, and surface status updates."""
+    """Build an LLM prompt from patient data, stream the response, and surface status updates.
+
+    Designed to be stored in session state. The UI reads ``running``,
+    ``status``, and ``text`` at render time instead of relying on callbacks.
+    """
 
     _STAGES: ClassVar[list[tuple[str, float]]] = [
         ("Pulling records…", 2.0),
@@ -48,9 +52,6 @@ class SummaryGenerator:
         scenario_context: str,
         model_id: str,
         base_url: str = DEFAULT_BASE_URL,
-        on_status: Callable[[str], None] | None = None,
-        on_chunk: Callable[[str], None] | None = None,
-        cancel_event: threading.Event | None = None,
         enable_thinking: bool = False,
     ) -> None:
         self.dataset = dataset
@@ -59,13 +60,48 @@ class SummaryGenerator:
         self.scenario_context = scenario_context
         self.model_id = model_id
         self.base_url = base_url
-        self.on_status = on_status
-        self.on_chunk = on_chunk
-        self.cancel_event = cancel_event
         self.enable_thinking = enable_thinking
 
+        self._cancel_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._status: str | None = None
+        self._text: str | None = None
+
+    # ── public properties (read at render time) ────────────────────
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def status(self) -> str | None:
+        return self._status
+
+    @property
+    def text(self) -> str | None:
+        return self._text
+
+    # ── lifecycle ──────────────────────────────────────────────────
+
+    def start(self) -> None:
+        """Launch summary generation in a background thread."""
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        add_script_run_ctx(self._thread, get_script_run_ctx())
+        self._thread.start()
+
+    def cancel(self) -> None:
+        """Signal cancellation.
+
+        Safe to call multiple times.
+        """
+        self._cancel_event.set()
+
+    # ── internals ──────────────────────────────────────────────────
+
     def _cancelled(self) -> bool:
-        return self.cancel_event is not None and self.cancel_event.is_set()
+        return self._cancel_event.is_set()
 
     def _build_messages(self) -> list[dict[str, str]]:
         demographics = get_patient_demographics(self.dataset, self.selected_idx)
@@ -89,23 +125,18 @@ class SummaryGenerator:
             {"role": "user", "content": prompt_tpl["user"].format(**fmt_kwargs)},
         ]
 
-    def run(self) -> str | None:
-        """Stream summary, pushing visible chunks via *on_chunk*.
-
-        Returns final text.
-        """
+    def _run(self) -> None:
         messages = self._build_messages()
 
         time_scale = 1.0 if self.enable_thinking else 0.2
         for label, duration in self._STAGES:
             if self._cancelled():
-                return None
-            if self.on_status:
-                self.on_status(label)
+                return
+            self._status = label
             time.sleep(duration * time_scale)
 
         if self._cancelled():
-            return None
+            return
 
         full_text = ""
         think_done = not self.enable_thinking
@@ -119,7 +150,7 @@ class SummaryGenerator:
         try:
             for delta in stream:
                 if self._cancelled():
-                    return None
+                    return
 
                 full_text += delta
 
@@ -131,9 +162,11 @@ class SummaryGenerator:
                         continue
 
                 visible = full_text.strip()
-                if visible and self.on_chunk:
-                    self.on_chunk(visible)
+                if visible:
+                    self._text = visible
         finally:
             stream.close()
 
-        return full_text.strip() if think_done else None
+        self._status = None
+        if think_done:
+            self._text = full_text.strip() or None

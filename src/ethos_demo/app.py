@@ -1,11 +1,9 @@
 """ETHOS Demo - Streamlit application."""
 
 import logging
-import threading
 from datetime import timedelta
 
 import streamlit as st
-from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
 
 from ethos_demo.backend import BackendEvent, BackendMonitor
 from ethos_demo.config import (
@@ -37,6 +35,17 @@ if not _logger.handlers:
 _logger.propagate = False
 
 
+def _ai_working() -> bool:
+    """True when any background AI task is running."""
+    return any(
+        o is not None and o.running
+        for o in [
+            st.session_state.get("_summarizer"),
+            st.session_state.get("_estimator"),
+        ]
+    )
+
+
 st.set_page_config(page_title="ETHOS Demo", layout="wide")
 
 _GLOBAL_CSS = (
@@ -56,17 +65,6 @@ st.markdown(f"<style>{_GLOBAL_CSS}</style>", unsafe_allow_html=True)
 
 st.title("ETHOS Demo")
 
-# ── Helpers ────────────────────────────────────────────────────────────────
-
-
-def _cancel_ai_work() -> None:
-    """Signal any in-flight background AI work to stop."""
-    ev: threading.Event | None = st.session_state.get("_cancel_event")
-    if ev is not None:
-        ev.set()
-    st.session_state.pop("_cancel_event", None)
-    st.session_state.pop("_ai_working_summary", None)
-
 
 # ── Sidebar ───────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -84,7 +82,7 @@ with st.sidebar:
     # ── AI working indicator (polls every 1s) ─────────────────
     @st.fragment(run_every=timedelta(seconds=1))
     def _ai_working_fragment():
-        if not st.session_state.get("_ai_working"):
+        if not _ai_working():
             return
         with st.container(key="ai_working_bar"):
             st.button(
@@ -167,17 +165,9 @@ def _start_summary(
     sc,
 ) -> None:
     """Launch EHR summary generation in a background thread."""
-    _cancel_ai_work()
-
-    st.session_state.pop("_ehr_summary", None)
-    st.session_state.pop("_summary_status", None)
-
-    cancel_event = threading.Event()
-    st.session_state["_cancel_event"] = cancel_event
-    gen = st.session_state.get("_ai_gen", 0) + 1
-    st.session_state["_ai_gen"] = gen
-    st.session_state["_ai_working"] = True
-    st.session_state["_ai_working_summary"] = True
+    old: SummaryGenerator | None = st.session_state.pop("_summarizer", None)
+    if old is not None:
+        old.cancel()
 
     summarizer = SummaryGenerator(
         dataset=ds,
@@ -185,25 +175,9 @@ def _start_summary(
         scenario=scenario,
         scenario_context=sc.context,
         model_id=backend.llm_model,
-        on_status=lambda msg: st.session_state.__setitem__("_summary_status", msg),
-        on_chunk=lambda text: st.session_state.__setitem__("_ehr_summary", text),
-        cancel_event=cancel_event,
     )
-
-    my_gen = gen
-    ctx = get_script_run_ctx()
-
-    def _bg() -> None:
-        summarizer.run()
-        st.session_state["_ai_working_summary"] = False
-        if st.session_state.get("_ai_gen") == my_gen:
-            if not st.session_state.get("_estimating"):
-                st.session_state["_ai_working"] = False
-            st.session_state.pop("_summary_status", None)
-
-    thread = threading.Thread(target=_bg, daemon=True)
-    add_script_run_ctx(thread, ctx)
-    thread.start()
+    st.session_state["_summarizer"] = summarizer
+    summarizer.start()
 
 
 # ── Main area ───────────────────────────────────────────────────────────────
@@ -256,14 +230,9 @@ if dataset_name and scenario:
         if selection_changed:
             st.session_state["_last_selection"] = current_key
             # Cancel any in-flight estimation
-            est_ev: threading.Event | None = st.session_state.get("_est_cancel_event")
-            if est_ev is not None:
-                est_ev.set()
-            st.session_state["_estimating"] = False
-            st.session_state["_est_thread_alive"] = False
-            st.session_state.pop("_est_progress", None)
-            for t in tasks:
-                st.session_state.pop(f"prob_{t}", None)
+            est: OutcomeEstimator | None = st.session_state.pop("_estimator", None)
+            if est is not None:
+                est.cancel()
             # Auto-fire summary if LLM model available
             if backend.has_llm_model:
                 _start_summary(
@@ -274,11 +243,13 @@ if dataset_name and scenario:
                 )
 
         # Deferred auto-fire: model selected after patient was already chosen
+        summarizer = st.session_state.get("_summarizer")
+        has_summary = summarizer is not None and summarizer.text is not None
         if (
             not selection_changed
             and backend.has_llm_model
-            and not st.session_state.get("_ehr_summary")
-            and not st.session_state.get("_ai_working")
+            and not has_summary
+            and not _ai_working()
         ):
             _start_summary(
                 ds=ds,
@@ -325,10 +296,9 @@ if dataset_name and scenario:
 
         @st.fragment(run_every=timedelta(milliseconds=500))
         def _summary_fragment():
-            summary_status = st.session_state.get("_summary_status")
-            summary_text = st.session_state.get("_ehr_summary")
-            if summary_text or summary_status:
-                msg = summary_text or summary_status
+            gen: SummaryGenerator | None = st.session_state.get("_summarizer")
+            if gen is not None and (gen.text or gen.status):
+                msg = gen.text or gen.status
                 st.markdown(_summary_box.format(msg=msg), unsafe_allow_html=True)
             elif not backend.has_llm_model:
                 st.markdown(_summary_unavailable, unsafe_allow_html=True)
@@ -342,11 +312,12 @@ if dataset_name and scenario:
 
         @st.fragment(run_every=timedelta(seconds=1))
         def _outcomes_fragment():
-            estimating = st.session_state.get("_estimating", False)
+            estimator: OutcomeEstimator | None = st.session_state.get("_estimator")
+            estimating = estimator is not None and estimator.running
             has_model = backend.has_ethos_model
 
             # ── Button row ────────────────────────────────────
-            prog = st.session_state.get("_est_progress")
+            prog = estimator.progress if estimator else None
             btn_col, _spacer = st.columns([1, 3])
             with btn_col, st.container(key="est_btn"):
                 if estimating:
@@ -381,6 +352,7 @@ if dataset_name and scenario:
                 )
 
             # ── Outcome cards ─────────────────────────────────
+            probs = estimator.probabilities if estimator else {}
             card_cols = st.columns(len(sc.outcomes))
             for col, rule in zip(card_cols, sc.outcomes, strict=False):
                 with col:
@@ -390,7 +362,7 @@ if dataset_name and scenario:
                         f"<b style='font-size:1.3em'>{rule.title}</b></div>",
                         unsafe_allow_html=True,
                     )
-                    entry = st.session_state.get(f"prob_{rule.name}")
+                    entry = probs.get(rule.name)
                     if entry is not None:
                         prob, k, n = entry
                         margin = wilson_margin(k, n)
@@ -415,27 +387,12 @@ if dataset_name and scenario:
                     "estimation %d/%d — %s",
                     prog[0],
                     prog[1],
-                    {
-                        r.name: f"{e[0]:.1%} ({e[1]}/{e[2]})"
-                        for r in sc.outcomes
-                        if (e := st.session_state.get(f"prob_{r.name}"))
-                    },
+                    estimator.log_summary,
                 )
 
             # ── Start estimation ──────────────────────────────
             if not estimating and run_clicked:
-                for t_name in tasks:
-                    st.session_state.pop(f"prob_{t_name}", None)
-                st.session_state.pop("_est_progress", None)
-                st.session_state["_estimating"] = True
-                st.session_state["_ai_working"] = True
-                st.session_state["_est_cancel_event"] = threading.Event()
-                st.rerun(scope="fragment")
-
-            # ── Launch estimation (deferred from button click) ──
-            if estimating and not st.session_state.get("_est_thread_alive"):
-                est_cancel = st.session_state.get("_est_cancel_event")
-                estimator = OutcomeEstimator(
+                new_est = OutcomeEstimator(
                     dataset=ds,
                     sample_idx=selected_idx,
                     scenario=scenario,
@@ -443,42 +400,17 @@ if dataset_name and scenario:
                     temperature=st.session_state.get(
                         "ethos_temperature", DEFAULT_ETHOS_TEMPERATURE
                     ),
-                    on_progress=lambda c, tot: st.session_state.__setitem__(
-                        "_est_progress", (c, tot)
-                    ),
-                    on_outcome_update=lambda name, p, k, n: st.session_state.__setitem__(
-                        f"prob_{name}", (p, k, n)
-                    ),
-                    cancel_event=est_cancel,
                 )
+                st.session_state["_estimator"] = new_est
+                st.rerun(scope="fragment")
 
-                def _est_bg() -> None:
-                    try:
-                        estimator.run()
-                    except Exception:
-                        _logger.exception("Estimation failed")
-                    finally:
-                        st.session_state["_estimating"] = False
-                        st.session_state["_est_thread_alive"] = False
-                        st.session_state.pop("_est_progress", None)
-                        if not st.session_state.get("_ai_working_summary"):
-                            st.session_state["_ai_working"] = False
-
-                st.session_state["_est_thread_alive"] = True
-                thread = threading.Thread(target=_est_bg, daemon=True)
-                add_script_run_ctx(thread, get_script_run_ctx())
-                thread.start()
+            # ── Launch estimation (deferred from button click) ──
+            if estimator is not None and not estimator.running and estimator.progress is None:
+                estimator.start()
 
             # ── Cancel estimation ─────────────────────────────
             if estimating and cancel_clicked:
-                ev = st.session_state.get("_est_cancel_event")
-                if ev:
-                    ev.set()
-                st.session_state["_estimating"] = False
-                st.session_state["_est_thread_alive"] = False
-                st.session_state.pop("_est_progress", None)
-                st.session_state["_ai_working"] = False
-                st.session_state.pop("_ai_working_summary", None)
+                st.session_state.pop("_estimator", None).cancel()
                 st.rerun(scope="fragment")
 
         _outcomes_fragment()

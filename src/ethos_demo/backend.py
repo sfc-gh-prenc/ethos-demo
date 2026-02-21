@@ -67,7 +67,13 @@ class BackendMonitor:
     @property
     def busy(self) -> bool:
         """True when backend requests are in-flight (summary, estimation, etc.)."""
-        return bool(st.session_state.get("_ai_working"))
+        return any(
+            o is not None and o.running
+            for o in [
+                st.session_state.get("_summarizer"),
+                st.session_state.get("_estimator"),
+            ]
+        )
 
     def poll(self) -> BackendEvent:
         """Run one health-check cycle and return what happened.
