@@ -121,9 +121,12 @@ async def stream_completion_async(
         extra_body={"include_stop_str_in_output": True},
         **kwargs,
     )
-    async for chunk in stream:
-        if chunk.choices and chunk.choices[0].text:
-            yield chunk.choices[0].text
+    try:
+        async for chunk in stream:
+            if chunk.choices and chunk.choices[0].text:
+                yield chunk.choices[0].text
+    finally:
+        await stream.close()
 
 
 def stream_chat_completion(

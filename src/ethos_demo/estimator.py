@@ -1,4 +1,4 @@
-"""Streaming outcome estimator with per-token timeline analysis."""
+"""Outcome estimator using batch completions with post-hoc token analysis."""
 
 import asyncio
 import logging
@@ -9,7 +9,7 @@ from datetime import timedelta
 
 from ethos.datasets import InferenceDataset
 
-from ethos_demo.client import stream_completion_async
+from ethos_demo.client import send_raw_completion_async
 from ethos_demo.config import DEFAULT_BASE_URL, MAX_CONCURRENT_STREAMS, N_STREAMS
 from ethos_demo.data import get_sample_prompt
 from ethos_demo.scenarios import SCENARIOS, OutcomeRule, Scenario
@@ -136,7 +136,7 @@ class _AggResult:
 
 
 class OutcomeEstimator:
-    """Fire N concurrent streaming completions and derive outcome probabilities."""
+    """Fire N concurrent completions and derive outcome probabilities."""
 
     def __init__(
         self,
@@ -147,7 +147,7 @@ class OutcomeEstimator:
         model_id: str,
         base_url: str = DEFAULT_BASE_URL,
         temperature: float = 1.0,
-        n_streams: int = N_STREAMS,
+        n_requests: int = N_STREAMS,
         max_concurrent: int = MAX_CONCURRENT_STREAMS,
         on_progress: Callable[[int, int], None] | None = None,
         on_outcome_update: Callable[[str, float], None] | None = None,
@@ -159,7 +159,7 @@ class OutcomeEstimator:
         self.model_id = model_id
         self.base_url = base_url
         self.temperature = temperature
-        self.n_streams = n_streams
+        self.n_requests = n_requests
         self.max_concurrent = max_concurrent
         self.on_progress = on_progress
         self.on_outcome_update = on_outcome_update
@@ -183,16 +183,23 @@ class OutcomeEstimator:
         windows = [r.time_window for r in self._rules if r.time_window is not None]
         return max(windows) if windows else None
 
-    # ── single stream ─────────────────────────────────────────────
+    def _is_cancelled(self) -> bool:
+        return self.cancel_event is not None and self.cancel_event.is_set()
 
-    async def _stream_one(self, sem: asyncio.Semaphore) -> StreamTracker:
+    # ── single request ────────────────────────────────────────────
+
+    async def _request_one(self, sem: asyncio.Semaphore) -> StreamTracker:
         tracker = StreamTracker(
             rules=self._rules,
             interval_estimates=self._interval_estimates,
             max_time=self._max_time,
         )
         async with sem:
-            stream = stream_completion_async(
+            if self._is_cancelled():
+                tracker.flush()
+                return tracker
+
+            pairs = await send_raw_completion_async(
                 self._prompt,
                 n_input_tokens=self._n_input_tokens,
                 model=self.model_id,
@@ -200,9 +207,8 @@ class OutcomeEstimator:
                 stop=self._stop_tokens,
                 temperature=self.temperature,
             )
-            async for chunk in stream:
-                if tracker.process_chunk(chunk):
-                    break
+            text, _finish = pairs[0]
+            tracker.process_chunk(text)
 
         tracker.flush()
         return tracker
@@ -211,17 +217,18 @@ class OutcomeEstimator:
 
     async def _run(self) -> None:
         sem = asyncio.Semaphore(self.max_concurrent)
-        futures = [asyncio.ensure_future(self._stream_one(sem)) for _ in range(self.n_streams)]
+        futures = [asyncio.ensure_future(self._request_one(sem)) for _ in range(self.n_requests)]
         total = len(futures)
         pending = set(futures)
         completed = 0
 
         while pending:
-            if self.cancel_event and self.cancel_event.is_set():
+            if self._is_cancelled():
                 for f in pending:
                     f.cancel()
                 self.cancelled = True
                 logger.debug("Estimation cancelled — %d/%d completed", completed, total)
+                await asyncio.gather(*pending, return_exceptions=True)
                 break
 
             done, pending = await asyncio.wait(
@@ -231,7 +238,7 @@ class OutcomeEstimator:
                 try:
                     tracker = future.result()
                 except Exception:
-                    logger.debug("Stream failed", exc_info=True)
+                    logger.debug("Request failed", exc_info=True)
                     completed += 1
                     continue
 
@@ -243,20 +250,24 @@ class OutcomeEstimator:
                     agg.valid += 1
                     if positive:
                         agg.positives += 1
-                    if self.on_outcome_update and agg.probability is not None:
+                    if (
+                        not self._is_cancelled()
+                        and self.on_outcome_update
+                        and agg.probability is not None
+                    ):
                         self.on_outcome_update(name, agg.probability)
 
-                if self.on_progress:
+                if not self._is_cancelled() and self.on_progress:
                     self.on_progress(completed, total)
 
                 logger.debug(
-                    "stream %d/%d — %s",
+                    "request %d/%d — %s",
                     completed,
                     total,
                     {n: f"{r.probability or 0:.1%}" for n, r in self.results.items()},
                 )
 
     def run(self) -> dict[str, _AggResult]:
-        """Fire all streams and return results."""
+        """Fire all requests and return results."""
         asyncio.run(self._run())
         return self.results

@@ -73,8 +73,8 @@ class BackendMonitor:
 
     @property
     def busy(self) -> bool:
-        """True when backend requests are in-flight (estimation, etc.)."""
-        return bool(st.session_state.get("_estimating"))
+        """True when backend requests are in-flight (summary, estimation, etc.)."""
+        return bool(st.session_state.get("_ai_working"))
 
     def poll(self) -> BackendEvent:
         """Run one health-check cycle and return what happened.
@@ -87,8 +87,6 @@ class BackendMonitor:
         loading = st.session_state.pop(self._KEY_LOADING, False)
         was_healthy = st.session_state.get(self._KEY_HEALTHY, None)
 
-        # Show "Checking…" only when recovering from an unreachable state;
-        # if already connected, run the check silently.
         if loading and not was_healthy:
             return BackendEvent.CHECKING
 

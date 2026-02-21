@@ -1,10 +1,9 @@
 """Streaming EHR summary generator backed by a chat LLM."""
 
 import logging
-import queue
 import threading
 import time
-from collections.abc import Callable, Generator
+from collections.abc import Callable
 from typing import TYPE_CHECKING, ClassVar
 
 import yaml
@@ -23,8 +22,6 @@ _logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from ethos.datasets import InferenceDataset
-
-_SENTINEL = None
 
 
 class SummaryGenerator:
@@ -52,7 +49,8 @@ class SummaryGenerator:
         model_id: str,
         base_url: str = DEFAULT_BASE_URL,
         on_status: Callable[[str], None] | None = None,
-        min_warmup_seconds: float = 3.0,
+        on_chunk: Callable[[str], None] | None = None,
+        cancel_event: threading.Event | None = None,
         enable_thinking: bool = True,
     ) -> None:
         self.dataset = dataset
@@ -62,8 +60,12 @@ class SummaryGenerator:
         self.model_id = model_id
         self.base_url = base_url
         self.on_status = on_status
-        self.min_warmup_seconds = min_warmup_seconds
+        self.on_chunk = on_chunk
+        self.cancel_event = cancel_event
         self.enable_thinking = enable_thinking
+
+    def _cancelled(self) -> bool:
+        return self.cancel_event is not None and self.cancel_event.is_set()
 
     def _build_messages(self) -> list[dict[str, str]]:
         demographics = get_patient_demographics(self.dataset, self.selected_idx)
@@ -87,57 +89,50 @@ class SummaryGenerator:
             {"role": "user", "content": prompt_tpl["user"].format(**fmt_kwargs)},
         ]
 
-    def _stream_worker(
-        self, messages: list[dict[str, str]], delta_q: queue.Queue[str | None]
-    ) -> None:
-        try:
-            for delta in stream_chat_completion(
-                messages,
-                model=self.model_id,
-                base_url=self.base_url,
-                enable_thinking=self.enable_thinking,
-            ):
-                delta_q.put(delta)
-        finally:
-            delta_q.put(_SENTINEL)
+    def run(self) -> str | None:
+        """Stream summary, pushing visible chunks via *on_chunk*.
 
-    def run(self) -> Generator[str, None, None]:
-        """Yield visible summary text chunks (thinking content is hidden).
-
-        Status callbacks fire during the warmup phase before yielding begins.
+        Returns final text.
         """
         messages = self._build_messages()
 
-        delta_q: queue.Queue[str | None] = queue.Queue()
-        threading.Thread(target=self._stream_worker, args=(messages, delta_q), daemon=True).start()
-        t0 = time.monotonic()
-
         for label, duration in self._STAGES:
+            if self._cancelled():
+                return None
             if self.on_status:
                 self.on_status(label)
             time.sleep(duration)
 
-        remaining = max(0, self.min_warmup_seconds - (time.monotonic() - t0))
-        time.sleep(remaining)
+        if self._cancelled():
+            return None
 
         full_text = ""
         think_done = not self.enable_thinking
-        while True:
-            try:
-                delta = delta_q.get(timeout=0.05)
-            except queue.Empty:
-                continue
-            if delta is _SENTINEL:
-                break
-            full_text += delta
 
-            if not think_done:
-                if "</think>" in full_text:
-                    think_done = True
-                    full_text = full_text.split("</think>", 1)[1]
-                else:
-                    continue
+        stream = stream_chat_completion(
+            messages,
+            model=self.model_id,
+            base_url=self.base_url,
+            enable_thinking=self.enable_thinking,
+        )
+        try:
+            for delta in stream:
+                if self._cancelled():
+                    return None
 
-            visible = full_text.strip()
-            if visible:
-                yield visible
+                full_text += delta
+
+                if not think_done:
+                    if "</think>" in full_text:
+                        think_done = True
+                        full_text = full_text.split("</think>", 1)[1]
+                    else:
+                        continue
+
+                visible = full_text.strip()
+                if visible and self.on_chunk:
+                    self.on_chunk(visible)
+        finally:
+            stream.close()
+
+        return full_text.strip() if think_done else None
