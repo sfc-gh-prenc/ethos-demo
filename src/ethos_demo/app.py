@@ -83,16 +83,18 @@ with st.sidebar:
     # ── AI working indicator (polls every 1s) ─────────────────
     @st.fragment(run_every=timedelta(seconds=1))
     def _ai_working_fragment():
-        if not _ai_working():
-            return
-        with st.container(key="ai_working_bar"):
-            st.button(
-                "AI is working…",
-                icon=":material/progress_activity:",
-                type="tertiary",
-                disabled=True,
-                key="_ai_working_label",
-            )
+        slot = st.empty()
+        if _ai_working():
+            with slot.container(key="ai_working_bar"):
+                st.button(
+                    "AI is working…",
+                    icon=":material/progress_activity:",
+                    type="tertiary",
+                    disabled=True,
+                    key="_ai_working_label",
+                )
+        else:
+            slot.empty()
 
     # ── ETHOS health status ───────────────────────────────────
     @st.fragment(run_every=timedelta(seconds=HEALTH_RETRY_SECONDS))
@@ -298,7 +300,7 @@ if dataset_name and scenario:
             "<span style='font-size:1.1em;color:gray'>Summary not available.</span></div>"
         )
 
-        @st.fragment(run_every=timedelta(milliseconds=200))
+        @st.fragment(run_every=timedelta(milliseconds=500))
         def _summary_fragment():
             gen: SummaryGenerator | None = st.session_state.get("_summarizer")
             if gen is not None and (gen.text or gen.status):
@@ -309,7 +311,8 @@ if dataset_name and scenario:
             else:
                 st.markdown(_summary_box.format(msg=""), unsafe_allow_html=True)
 
-        _summary_fragment()
+        with st.container(key="ehr_summary_slot"):
+            _summary_fragment()
 
         # ── Outcome estimation ────────────────────────────────────
         st.divider()
@@ -414,10 +417,11 @@ if dataset_name and scenario:
 
             # ── Cancel estimation ─────────────────────────────
             if estimating and cancel_clicked:
-                st.session_state.pop("_estimator", None).cancel()
+                estimator.cancel()
                 st.rerun(scope="fragment")
 
-        _outcomes_fragment()
+        with st.container(key="outcomes_slot"):
+            _outcomes_fragment()
 
 
 def main():
