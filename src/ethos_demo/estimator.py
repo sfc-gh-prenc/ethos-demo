@@ -12,6 +12,7 @@ from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ct
 from ethos_demo.client import send_raw_completion_async
 from ethos_demo.config import (
     DEFAULT_BASE_URL,
+    DEFAULT_MODEL_CONTEXT_SIZE,
     MAX_CONCURRENT_REQUESTS,
     N_COMPLETIONS,
     N_PER_REQUEST,
@@ -157,6 +158,7 @@ class OutcomeEstimator:
         model_id: str,
         base_url: str = DEFAULT_BASE_URL,
         temperature: float = 1.0,
+        max_model_len: int = DEFAULT_MODEL_CONTEXT_SIZE,
         n_completions: int = N_COMPLETIONS,
         n_per_request: int = N_PER_REQUEST,
         max_concurrent: int = MAX_CONCURRENT_REQUESTS,
@@ -168,6 +170,7 @@ class OutcomeEstimator:
         self.model_id = model_id
         self.base_url = base_url
         self.temperature = temperature
+        self.max_model_len = max_model_len
         self.n_completions = n_completions
         self.n_per_request = n_per_request
         self.max_concurrent = max_concurrent
@@ -273,6 +276,7 @@ class OutcomeEstimator:
                 n=n,
                 stop=self._stop_tokens,
                 temperature=self.temperature,
+                max_model_len=self.max_model_len,
                 allowed_token_ids=self._allowed_token_ids,
             )
 

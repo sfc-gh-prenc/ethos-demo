@@ -6,8 +6,8 @@ from enum import StrEnum, auto
 
 import streamlit as st
 
-from ethos_demo.client import check_health, list_models
-from ethos_demo.config import HEALTH_POLL_SECONDS
+from ethos_demo.client import ModelInfo, check_health, list_models
+from ethos_demo.config import DEFAULT_MODEL_CONTEXT_SIZE, HEALTH_POLL_SECONDS
 
 _logger = logging.getLogger(__name__)
 
@@ -41,8 +41,24 @@ class BackendMonitor:
         return bool(st.session_state.get(self._KEY_HEALTHY))
 
     @property
-    def models(self) -> list[str]:
+    def _all_models(self) -> list[ModelInfo]:
         return st.session_state.get(self._KEY_MODELS, [])
+
+    @property
+    def all_model_ids(self) -> list[str]:
+        return [m.id for m in self._all_models]
+
+    def _model_ids_by_type(self, model_type: str) -> list[str]:
+        typed = [m.id for m in self._all_models if m.model_type == model_type]
+        return typed if typed else self.all_model_ids
+
+    @property
+    def ethos_models(self) -> list[str]:
+        return self._model_ids_by_type("ethos")
+
+    @property
+    def llm_models(self) -> list[str]:
+        return self._model_ids_by_type("llm")
 
     @property
     def ethos_model(self) -> str | None:
@@ -61,6 +77,15 @@ class BackendMonitor:
     @property
     def has_llm_model(self) -> bool:
         return self.healthy and self.llm_model is not None
+
+    @property
+    def ethos_max_model_len(self) -> int:
+        selected = self.ethos_model
+        if selected:
+            for m in self._all_models:
+                if m.id == selected and m.max_model_len is not None:
+                    return m.max_model_len
+        return DEFAULT_MODEL_CONTEXT_SIZE
 
     # ── actions ───────────────────────────────────────────────────
 
@@ -115,9 +140,10 @@ class BackendMonitor:
             models = []
         st.session_state[self._KEY_MODELS] = models
 
+        model_ids = {m.id for m in models}
         for key in ("ethos_model_id", "llm_model_id"):
             saved = st.session_state.get(f"_saved_{key}")
-            if saved and saved not in models:
+            if saved and saved not in model_ids:
                 _logger.info("Model %r no longer available — resetting %s", saved, key)
                 st.session_state.pop(f"_saved_{key}", None)
                 st.session_state.pop(key, None)

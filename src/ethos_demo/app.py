@@ -118,6 +118,7 @@ with st.sidebar:
     def _model_select(
         label: str,
         key: str,
+        models: list[str],
         default: str | None = None,
         placeholder: str = "Choose model ID",
     ) -> None:
@@ -126,7 +127,6 @@ with st.sidebar:
         if current and current != "Could not fetch models":
             st.session_state[saved_key] = current
 
-        models = backend.models
         if models:
             prev = st.session_state.get(saved_key, default)
             idx = models.index(prev) if prev and prev in models else None
@@ -148,7 +148,7 @@ with st.sidebar:
                 key=key,
             )
 
-    _model_select("ETHOS Provider", "ethos_model_id")
+    _model_select("ETHOS Provider", "ethos_model_id", backend.ethos_models)
     st.slider(
         "Temp.",
         min_value=0.0,
@@ -158,7 +158,7 @@ with st.sidebar:
         format="%.1f",
         key="ethos_temperature",
     )
-    _model_select("LLM Provider", "llm_model_id")
+    _model_select("LLM Provider", "llm_model_id", backend.llm_models)
 
 
 def _start_summary(
@@ -408,6 +408,7 @@ if dataset_name and scenario:
                     temperature=st.session_state.get(
                         "ethos_temperature", DEFAULT_ETHOS_TEMPERATURE
                     ),
+                    max_model_len=backend.ethos_max_model_len,
                     allowed_token_ids=get_allowed_token_ids(dataset_name, ds_task),
                 )
                 st.session_state["_estimator"] = new_est

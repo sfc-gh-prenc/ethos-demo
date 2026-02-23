@@ -1,6 +1,7 @@
 """Thin OpenAI-compatible client for talking to the Ray Serve vLLM backend."""
 
 from collections.abc import AsyncIterator, Generator
+from dataclasses import dataclass
 
 import httpx
 from openai import AsyncOpenAI, OpenAI
@@ -8,9 +9,16 @@ from openai import AsyncOpenAI, OpenAI
 from ethos_demo.config import (
     API_KEY,
     DEFAULT_BASE_URL,
+    DEFAULT_MODEL_CONTEXT_SIZE,
     HEALTH_TIMEOUT_SECONDS,
-    MODEL_CONTEXT_SIZE,
 )
+
+
+@dataclass
+class ModelInfo:
+    id: str
+    model_type: str  # "ethos" | "llm" | "unknown"
+    max_model_len: int | None
 
 
 def get_client(base_url: str = DEFAULT_BASE_URL) -> OpenAI:
@@ -31,10 +39,28 @@ def check_health(base_url: str = DEFAULT_BASE_URL) -> bool:
         return False
 
 
-def list_models(base_url: str = DEFAULT_BASE_URL) -> list[str]:
-    """Return available model IDs from the /v1/models endpoint."""
+def _parse_model_type(model_id: str) -> str:
+    if model_id.startswith("ethos/"):
+        return "ethos"
+    if model_id.startswith("llm/"):
+        return "llm"
+    return "unknown"
+
+
+def list_models(base_url: str = DEFAULT_BASE_URL) -> list[ModelInfo]:
+    """Return available models with parsed type and context size."""
     client = get_client(base_url)
-    return sorted(m.id for m in client.models.list())
+    return sorted(
+        (
+            ModelInfo(
+                id=m.id,
+                model_type=_parse_model_type(m.id),
+                max_model_len=(m.model_extra or {}).get("max_model_len"),
+            )
+            for m in client.models.list()
+        ),
+        key=lambda mi: mi.id,
+    )
 
 
 def send_completion_request(
@@ -58,11 +84,12 @@ def send_raw_completion(
     base_url: str = DEFAULT_BASE_URL,
     n: int = 1,
     stop: list[str] | None = None,
+    max_model_len: int = DEFAULT_MODEL_CONTEXT_SIZE,
     **kwargs,
 ) -> list[tuple[str, str]]:
     """Send a completion request and return (text, finish_reason) for each choice."""
     client = get_client(base_url)
-    max_tokens = MODEL_CONTEXT_SIZE - n_input_tokens
+    max_tokens = max_model_len - n_input_tokens
     response = client.completions.create(
         model=model,
         prompt=prompt,
@@ -84,11 +111,12 @@ async def send_raw_completion_async(
     n: int = 1,
     stop: list[str] | None = None,
     allowed_token_ids: list[int] | None = None,
+    max_model_len: int = DEFAULT_MODEL_CONTEXT_SIZE,
     **kwargs,
 ) -> list[tuple[str, str]]:
     """Async version — send a completion request, return (text, finish_reason) per choice."""
     client = get_async_client(base_url)
-    max_tokens = MODEL_CONTEXT_SIZE - n_input_tokens
+    max_tokens = max_model_len - n_input_tokens
     extra_body: dict = {"include_stop_str_in_output": True}
     if allowed_token_ids is not None:
         extra_body["allowed_token_ids"] = allowed_token_ids
@@ -111,11 +139,12 @@ async def stream_completion_async(
     model: str,
     base_url: str = DEFAULT_BASE_URL,
     stop: list[str] | None = None,
+    max_model_len: int = DEFAULT_MODEL_CONTEXT_SIZE,
     **kwargs,
 ) -> AsyncIterator[str]:
     """Stream a text completion, yielding text deltas as they arrive."""
     client = get_async_client(base_url)
-    max_tokens = MODEL_CONTEXT_SIZE - n_input_tokens
+    max_tokens = max_model_len - n_input_tokens
     stream = await client.completions.create(
         model=model,
         prompt=prompt,

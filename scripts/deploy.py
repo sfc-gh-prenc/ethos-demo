@@ -39,7 +39,7 @@ def main():
 
     deepseek_config = LLMConfig(
         model_loading_config={
-            "model_id": "llama-3.1",
+            "model_id": "llm/llama-3.1",
             "model_source": "meta-llama/Llama-3.1-70B-Instruct",
         },
         deployment_config={"num_replicas": 1},
@@ -51,7 +51,7 @@ def main():
 
     ethos_config = LLMConfig(
         model_loading_config={
-            "model_id": f"ethos-{args.model_path.name.lower()}",
+            "model_id": f"ethos/{args.model_path.name.lower()}",
             "model_source": str(args.model_path),
         },
         deployment_config={"num_replicas": ethos_replicas},
