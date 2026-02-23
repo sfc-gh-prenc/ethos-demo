@@ -16,10 +16,10 @@ from ethos_demo.config import (
 )
 from ethos_demo.data import (
     build_sample_labels,
+    format_timedelta,
     get_allowed_token_ids,
     get_patient_bmi_group,
     get_patient_demographics,
-    get_sample_context_stats,
     load_dataset,
     sample_indices,
 )
@@ -170,7 +170,6 @@ def _start_summary(
     ds,
     selected_idx: int,
     scenario: Scenario,
-    sc,
     dataset_name: str,
 ) -> None:
     """Launch EHR summary generation in a background thread."""
@@ -207,7 +206,7 @@ with col_ds:
 col_sc, col_pt = st.columns(2)
 with col_sc:
     scenario = st.selectbox(
-        "Scenario",
+        "Clinical Scenario",
         options=list(Scenario),
         format_func=lambda s: SCENARIOS[s].description,
         index=None,
@@ -248,7 +247,6 @@ if dataset_name and scenario:
                     ds=ds,
                     selected_idx=selected_idx,
                     scenario=scenario,
-                    sc=sc,
                     dataset_name=dataset_name,
                 )
 
@@ -265,7 +263,6 @@ if dataset_name and scenario:
                 ds=ds,
                 selected_idx=selected_idx,
                 scenario=scenario,
-                sc=sc,
                 dataset_name=dataset_name,
             )
 
@@ -284,14 +281,38 @@ if dataset_name and scenario:
                 unsafe_allow_html=True,
             )
 
-        context_stats = get_sample_context_stats(ds, selected_idx)
+        split = sc.history_fn(ds, selected_idx)
 
-        st.subheader("EHR History")
-        ehr_cols = st.columns(len(demographics))
-        for col, (key, value) in zip(ehr_cols, context_stats.items(), strict=False):
-            col.markdown(
-                f"<span style='color:gray'>{key}</span><br>"
-                f"<span style='font-size:1.3em'>{value}</span>",
+        st.subheader("EHR")
+
+        _section_hdr = "<span style='font-size:1.1em;font-weight:600'>{title}</span>"
+        _stat_html = (
+            "<span style='color:gray'>{label}</span><br>"
+            "<span style='font-size:1.3em'>{value}</span>"
+        )
+        col_enc, col_hist = st.columns(2)
+        with col_enc:
+            st.markdown(_section_hdr.format(title="Current Encounter"), unsafe_allow_html=True)
+            e1, e2 = st.columns(2)
+            e1.markdown(
+                _stat_html.format(
+                    label="Time Span", value=format_timedelta(split.present_time_span)
+                ),
+                unsafe_allow_html=True,
+            )
+            e2.markdown(
+                _stat_html.format(label="Events", value=f"{len(split.present_tokens):,}"),
+                unsafe_allow_html=True,
+            )
+        with col_hist:
+            st.markdown(_section_hdr.format(title="History"), unsafe_allow_html=True)
+            h1, h2 = st.columns(2)
+            h1.markdown(
+                _stat_html.format(label="Time Span", value=format_timedelta(split.past_time_span)),
+                unsafe_allow_html=True,
+            )
+            h2.markdown(
+                _stat_html.format(label="Events", value=f"{len(split.past_tokens):,}"),
                 unsafe_allow_html=True,
             )
 

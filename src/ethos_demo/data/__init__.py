@@ -3,6 +3,7 @@
 from .datasets import (
     build_sample_labels,
     find_sample_idx,
+    format_timedelta,
     get_admission_order,
     get_allowed_token_ids,
     get_sample_context_stats,
@@ -24,6 +25,7 @@ from .tokens import format_tokens_as_dicts
 __all__ = [
     "build_sample_labels",
     "find_sample_idx",
+    "format_timedelta",
     "format_tokens_as_dicts",
     "get_admission_order",
     "get_allowed_token_ids",

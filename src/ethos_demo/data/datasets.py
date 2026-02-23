@@ -126,12 +126,12 @@ def get_sample_context_stats(dataset: InferenceDataset, idx: int) -> dict[str, s
     span = timedelta(microseconds=time_end_us - time_start_us)
 
     return {
-        "Time": _format_timedelta(span),
+        "Time": format_timedelta(span),
         "Tokens": str(n_tokens),
     }
 
 
-def _format_timedelta(td: timedelta) -> str:
+def format_timedelta(td: timedelta) -> str:
     total_days = td.days
     total_months = round(total_days / 30.44)
     years, months = divmod(total_months, 12)

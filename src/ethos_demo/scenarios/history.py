@@ -1,10 +1,21 @@
 """Scenario-specific timeline extraction functions."""
 
+from dataclasses import dataclass
 from datetime import timedelta
 
 from ethos.datasets import InferenceDataset
 
-_24H_US = int(timedelta(hours=24) / timedelta(microseconds=1))
+_36H_US = int(timedelta(hours=36) / timedelta(microseconds=1))
+
+
+@dataclass(frozen=True)
+class HistorySplit:
+    """Result of splitting a patient timeline into past history and current encounter."""
+
+    past_tokens: list[str]
+    present_tokens: list[str]
+    past_time_span: timedelta
+    present_time_span: timedelta
 
 
 def _timeline_bounds(dataset: InferenceDataset, idx: int) -> tuple[int, int]:
@@ -28,11 +39,59 @@ def _decode_tokens(dataset: InferenceDataset, lo: int, hi: int) -> list[str]:
     return [t for t in tokens if t is not None]
 
 
-def get_triage_history(dataset: InferenceDataset, idx: int) -> tuple[list[str], list[str]]:
-    """Return (past_tokens, present_tokens) for a triage scenario.
+def _time_span(dataset: InferenceDataset, lo: int, hi: int) -> timedelta:
+    """Return the time span between indices *lo* and *hi*."""
+    if hi <= lo:
+        return timedelta(0)
+    return timedelta(microseconds=int(dataset.times[hi].item()) - int(dataset.times[lo].item()))
 
-    Present = tokens sharing the same timestamp as prediction time. Past = everything before that
-    timestamp.
+
+def _build_split(
+    dataset: InferenceDataset,
+    timeline_start: int,
+    window_start: int,
+    start_idx: int,
+) -> HistorySplit:
+    """Construct a HistorySplit from the boundary indices.
+
+    The leading TIME_INTERVAL token at the boundary is moved into history because it represents
+    elapsed time *before* the current encounter. The history time span covers the full record up to
+    prediction time.
+    """
+    interval_tokens = dataset.vocab.interval_estimates.get("mean", {})
+    if window_start <= start_idx:
+        first = dataset.vocab.decode(dataset.tokens[window_start : window_start + 1])
+        if first and first[0] in interval_tokens:
+            window_start += 1
+
+    if window_start > timeline_start:
+        past = _decode_tokens(dataset, timeline_start, window_start - 1)
+    else:
+        past = []
+
+    # History spans the entire record up to prediction time (present day)
+    past_span = _time_span(dataset, timeline_start, start_idx)
+
+    if window_start <= start_idx:
+        present = _decode_tokens(dataset, window_start, start_idx)
+        present_span = _time_span(dataset, window_start, start_idx)
+    else:
+        present = []
+        present_span = timedelta(0)
+
+    return HistorySplit(
+        past_tokens=past,
+        present_tokens=present,
+        past_time_span=past_span,
+        present_time_span=present_span,
+    )
+
+
+def get_triage_history(dataset: InferenceDataset, idx: int) -> HistorySplit:
+    """Split timeline for a triage scenario.
+
+    Current encounter = tokens sharing the same timestamp as prediction time. EHR history =
+    everything before that timestamp.
     """
     timeline_start, start_idx = _timeline_bounds(dataset, idx)
     prediction_time_us = int(dataset.times[start_idx].item())
@@ -41,43 +100,31 @@ def get_triage_history(dataset: InferenceDataset, idx: int) -> tuple[list[str], 
     mask = (times_slice == prediction_time_us).nonzero(as_tuple=False)
     window_start = timeline_start + int(mask[0].item())
 
-    past = (
-        _decode_tokens(dataset, timeline_start, window_start - 1)
-        if window_start > timeline_start
-        else []
-    )
-    present = _decode_tokens(dataset, window_start, start_idx)
-    return past, present
+    return _build_split(dataset, timeline_start, window_start, start_idx)
 
 
-def get_last_24h_history(dataset: InferenceDataset, idx: int) -> tuple[list[str], list[str]]:
-    """Return (past_tokens, present_tokens) for a hospital-admission scenario.
+def get_last_36h_history(dataset: InferenceDataset, idx: int) -> HistorySplit:
+    """Split timeline for a hospital-admission scenario.
 
-    Present = tokens from the last 24 hours before prediction time. Past = everything before the
-    24-hour window.
+    Current encounter = tokens from the last 36 hours before prediction time. EHR history =
+    everything before the 36-hour window.
     """
     timeline_start, start_idx = _timeline_bounds(dataset, idx)
     prediction_time_us = int(dataset.times[start_idx].item())
-    cutoff_us = prediction_time_us - _24H_US
+    cutoff_us = prediction_time_us - _36H_US
 
     times_slice = dataset.times[timeline_start : start_idx + 1]
     first_in_window = int((times_slice >= cutoff_us).nonzero(as_tuple=False)[0].item())
     window_start = timeline_start + first_in_window
 
-    past = (
-        _decode_tokens(dataset, timeline_start, window_start - 1)
-        if window_start > timeline_start
-        else []
-    )
-    present = _decode_tokens(dataset, window_start, start_idx)
-    return past, present
+    return _build_split(dataset, timeline_start, window_start, start_idx)
 
 
-def get_stay_history(dataset: InferenceDataset, idx: int) -> tuple[list[str], list[str]]:
-    """Return (past_tokens, present_tokens) for a hospital-discharge scenario.
+def get_stay_history(dataset: InferenceDataset, idx: int) -> HistorySplit:
+    """Split timeline for a hospital-discharge scenario.
 
-    Present = tokens from the most recent HOSPITAL_ADMISSION to prediction time. Past = everything
-    before that admission.
+    Current encounter = 36h before the most recent HOSPITAL_ADMISSION + the entire stay up to
+    prediction time. EHR history = everything before that expanded window.
     """
     timeline_start, start_idx = _timeline_bounds(dataset, idx)
     token_ids = dataset.tokens[timeline_start : start_idx + 1]
@@ -89,12 +136,14 @@ def get_stay_history(dataset: InferenceDataset, idx: int) -> tuple[list[str], li
             admission_pos = i
             break
 
-    window_start = timeline_start + admission_pos if admission_pos is not None else timeline_start
+    admission_idx = timeline_start + admission_pos if admission_pos is not None else timeline_start
 
-    past = (
-        _decode_tokens(dataset, timeline_start, window_start - 1)
-        if window_start > timeline_start
-        else []
-    )
-    present = _decode_tokens(dataset, window_start, start_idx)
-    return past, present
+    # Expand window to 36h before the admission timestamp
+    admission_time_us = int(dataset.times[admission_idx].item())
+    pre_cutoff_us = admission_time_us - _36H_US
+
+    times_slice = dataset.times[timeline_start : admission_idx + 1]
+    hits = (times_slice >= pre_cutoff_us).nonzero(as_tuple=False)
+    window_start = timeline_start + int(hits[0].item()) if len(hits) > 0 else timeline_start
+
+    return _build_split(dataset, timeline_start, window_start, start_idx)

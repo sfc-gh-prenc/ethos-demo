@@ -76,7 +76,10 @@ def get_decile_ranges(dataset_name: str, names: list[str] | str) -> dict[str, di
     double-serialize the argument).
     """
     if isinstance(names, str):
-        names = json.loads(names)
+        try:
+            names = json.loads(names)
+        except (json.JSONDecodeError, ValueError):
+            names = [names]
     all_q = load_quantiles(dataset_name)
     result: dict[str, dict[str, str] | str] = {}
 

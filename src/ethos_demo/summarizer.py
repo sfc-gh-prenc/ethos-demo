@@ -9,8 +9,10 @@ Stage 2: Stream a present-event summary that incorporates the past-history
 import json
 import logging
 import threading
-import time
-from typing import TYPE_CHECKING, ClassVar
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
+from typing import TYPE_CHECKING, ClassVar, TypeVar
 
 import yaml
 from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
@@ -141,13 +143,26 @@ class SummaryGenerator:
 
     # ── internals ──────────────────────────────────────────────────
 
+    _T = TypeVar("_T")
+
     def _cancelled(self) -> bool:
         return self._cancel_event.is_set()
 
-    def _wait(self, seconds: float) -> None:
-        scaled = seconds * (1.0 if self._chat.enable_thinking else 0.2)
-        if scaled > 0:
-            time.sleep(scaled)
+    def _call_or_cancel(self, fn: Callable[..., _T], *args, **kwargs) -> _T | None:
+        """Run *fn* off-thread, polling for cancellation every 0.2 s.
+
+        Returns the result of *fn*, or ``None`` if cancelled first.
+        """
+        pool = ThreadPoolExecutor(max_workers=1)
+        future = pool.submit(fn, *args, **kwargs)
+        pool.shutdown(wait=False)
+        while True:
+            if self._cancelled():
+                return None
+            try:
+                return future.result(timeout=0.2)
+            except FutureTimeout:
+                continue
 
     @staticmethod
     def _fmt_demographics(
@@ -209,20 +224,12 @@ class SummaryGenerator:
     def _run(self) -> None:
         # ── 1. Split & format timeline ──────────────────────────
         self._status = "Pulling records…"
-        self._wait(2.0)
-        if self._cancelled():
-            return
 
         sc = SCENARIOS[self.scenario]
-        past_tokens, present_tokens = sc.history_fn(self.dataset, self.selected_idx)
+        split = sc.history_fn(self.dataset, self.selected_idx)
 
-        self._status = "Reading…"
-        self._wait(1.5)
-        if self._cancelled():
-            return
-
-        past_dicts = format_tokens_as_dicts(past_tokens)
-        present_dicts = format_tokens_as_dicts(present_tokens)
+        past_dicts = format_tokens_as_dicts(split.past_tokens)
+        present_dicts = format_tokens_as_dicts(split.present_tokens)
 
         timeline_start_us, _prediction_us = get_timeline_times_us(
             self.dataset,
@@ -236,7 +243,7 @@ class SummaryGenerator:
         present_demo = get_patient_demographics(self.dataset, self.selected_idx)
 
         past_fmt = self._fmt_demographics(past_demo)
-        present_fmt = self._fmt_demographics(present_demo, SCENARIOS[self.scenario].context)
+        present_fmt = self._fmt_demographics(present_demo, sc.context)
 
         _logger.debug(
             "Timeline split (%s): %d past events, %d present events",
@@ -244,6 +251,7 @@ class SummaryGenerator:
             len(past_dicts),
             len(present_dicts),
         )
+        _logger.debug("Current encounter tokens (%s): %s", self.scenario, split.present_tokens)
 
         # ── 2. Stage 1: Summarize past history (with tool calling) ──
         if past_dicts:
@@ -252,37 +260,38 @@ class SummaryGenerator:
                 return
 
             past_messages = self._build_past_history_messages(past_dicts, past_fmt)
-            _msgs, raw = self._chat.with_tools(
+            result = self._call_or_cancel(
+                self._chat.with_tools,
                 past_messages,
                 self._TOOL_SCHEMA,
                 self._handle_tool_call,
                 max_rounds=1,
             )
+            if result is None:
+                return
+            _msgs, raw = result
             past_summary = self._strip_think(raw, self._chat.enable_thinking)
             _logger.debug("Past history summary: %s", past_summary)
         else:
             past_summary = _NO_PAST_HISTORY
 
-        if self._cancelled():
-            return
-
         # ── 3. Stage 2: Present summary (tool loop then stream) ──
-        self._status = "Focusing on present…"
+        self._status = "Focusing on current encounter…"
         if self._cancelled():
             return
 
         present_messages = self._build_present_messages(present_dicts, past_summary, present_fmt)
 
-        # Let the model resolve tool calls first (non-streaming, single round)
-        resolved_messages, preflight_text = self._chat.with_tools(
+        result = self._call_or_cancel(
+            self._chat.with_tools,
             present_messages,
             self._TOOL_SCHEMA,
             self._handle_tool_call,
             max_rounds=1,
         )
-
-        if self._cancelled():
+        if result is None:
             return
+        resolved_messages, preflight_text = result
 
         if preflight_text:
             self._text = (

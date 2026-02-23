@@ -9,12 +9,12 @@ from typing import TYPE_CHECKING
 from ethos.constants import SpecialToken
 from ethos.supported_tasks import Task
 
-from .history import get_last_24h_history, get_stay_history, get_triage_history
+from .history import HistorySplit, get_last_36h_history, get_stay_history, get_triage_history
 
 if TYPE_CHECKING:
     from ethos.datasets import InferenceDataset
 
-HistoryFn = Callable[["InferenceDataset", int], tuple[list[str], list[str]]]
+HistoryFn = Callable[["InferenceDataset", int], HistorySplit]
 
 
 class Scenario(StrEnum):
@@ -97,11 +97,10 @@ SCENARIOS: dict[Scenario, ScenarioConfig] = {
         ),
         context=(
             "The patient is being admitted to the hospital. The admitting team is reviewing "
-            "the clinical picture, evaluating the need for ICU-level care, and prioritizing "
-            "the initial workup. "
-            "The present timeline covers the last 24 hours before admission."
+            "the clinical picture. "
+            "The present timeline covers the last 36 hours before admission."
         ),
-        history_fn=get_last_24h_history,
+        history_fn=get_last_36h_history,
     ),
     Scenario.HOSPITAL_DISCHARGE: ScenarioConfig(
         description="Discharge \u2014 patient was discharged from hospital",
@@ -127,8 +126,8 @@ SCENARIOS: dict[Scenario, ScenarioConfig] = {
             "The patient is being discharged from the hospital. The care team is reviewing "
             "the clinical course, assessing readiness for discharge, and evaluating the risk "
             "of short-term and medium-term readmission. "
-            "The present timeline covers events from the entire hospital stay from admission "
-            "to discharge."
+            "The present timeline covers events from 36 hours before admission through the "
+            "entire hospital stay to discharge."
         ),
         history_fn=get_stay_history,
     ),

@@ -7,11 +7,12 @@ from .config import (
     Scenario,
     ScenarioConfig,
 )
-from .history import get_timeline_times_us
+from .history import HistorySplit, get_timeline_times_us
 
 __all__ = [
     "SCENARIOS",
     "HistoryFn",
+    "HistorySplit",
     "OutcomeRule",
     "Scenario",
     "ScenarioConfig",
