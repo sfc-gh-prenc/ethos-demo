@@ -1,11 +1,20 @@
 """Scenario definitions for the ETHOS Demo application."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 from ethos.constants import SpecialToken
 from ethos.supported_tasks import Task
+
+from .history import get_last_24h_history, get_stay_history, get_triage_history
+
+if TYPE_CHECKING:
+    from ethos.datasets import InferenceDataset
+
+HistoryFn = Callable[["InferenceDataset", int], tuple[list[str], list[str]]]
 
 
 class Scenario(StrEnum):
@@ -30,6 +39,7 @@ class ScenarioConfig:
     stop_tokens: tuple[str, ...]
     outcomes: tuple[OutcomeRule, ...]
     context: str
+    history_fn: HistoryFn
 
     @property
     def task_names(self) -> list[str]:
@@ -65,6 +75,7 @@ SCENARIOS: dict[Scenario, ScenarioConfig] = {
             "clinical team is determining the urgency of care needed. "
             "The present timeline covers events from the triage encounter."
         ),
+        history_fn=get_triage_history,
     ),
     Scenario.HOSPITAL_ADMISSION: ScenarioConfig(
         description="Admission \u2014 patient was admitted to hospital",
@@ -90,6 +101,7 @@ SCENARIOS: dict[Scenario, ScenarioConfig] = {
             "the initial workup. "
             "The present timeline covers the last 24 hours before admission."
         ),
+        history_fn=get_last_24h_history,
     ),
     Scenario.HOSPITAL_DISCHARGE: ScenarioConfig(
         description="Discharge \u2014 patient was discharged from hospital",
@@ -118,5 +130,6 @@ SCENARIOS: dict[Scenario, ScenarioConfig] = {
             "The present timeline covers events from the entire hospital stay from admission "
             "to discharge."
         ),
+        history_fn=get_stay_history,
     ),
 }

@@ -18,14 +18,7 @@ from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ct
 from .client import ChatClient
 from .config import DEFAULT_BASE_URL, PROMPTS_DIR
 from .data import format_tokens_as_dicts, get_decile_ranges, get_patient_demographics
-from .scenarios import (
-    SCENARIOS,
-    Scenario,
-    get_last_24h_history,
-    get_stay_history,
-    get_timeline_times_us,
-    get_triage_history,
-)
+from .scenarios import SCENARIOS, Scenario, get_timeline_times_us
 
 _logger = logging.getLogger(__name__)
 
@@ -44,12 +37,6 @@ class SummaryGenerator:
     Designed to be stored in session state. The UI reads ``running``,
     ``status``, and ``text`` at render time instead of relying on callbacks.
     """
-
-    _HISTORY_FN: ClassVar[dict] = {
-        Scenario.TRIAGE: get_triage_history,
-        Scenario.HOSPITAL_ADMISSION: get_last_24h_history,
-        Scenario.HOSPITAL_DISCHARGE: get_stay_history,
-    }
 
     _TOOL_SCHEMA: ClassVar[list[dict]] = [
         {
@@ -226,8 +213,8 @@ class SummaryGenerator:
         if self._cancelled():
             return
 
-        history_fn = self._HISTORY_FN[self.scenario]
-        past_tokens, present_tokens = history_fn(self.dataset, self.selected_idx)
+        sc = SCENARIOS[self.scenario]
+        past_tokens, present_tokens = sc.history_fn(self.dataset, self.selected_idx)
 
         self._status = "Reading…"
         self._wait(1.5)

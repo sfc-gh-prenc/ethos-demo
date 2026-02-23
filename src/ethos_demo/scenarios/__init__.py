@@ -1,25 +1,19 @@
-"""Scenarios subpackage — re-exports all public names for backward compatibility."""
+"""Scenarios subpackage — re-exports all public names."""
 
 from .config import (
     SCENARIOS,
+    HistoryFn,
     OutcomeRule,
     Scenario,
     ScenarioConfig,
 )
-from .history import (
-    get_last_24h_history,
-    get_stay_history,
-    get_timeline_times_us,
-    get_triage_history,
-)
+from .history import get_timeline_times_us
 
 __all__ = [
     "SCENARIOS",
+    "HistoryFn",
     "OutcomeRule",
     "Scenario",
     "ScenarioConfig",
-    "get_last_24h_history",
-    "get_stay_history",
     "get_timeline_times_us",
-    "get_triage_history",
 ]
