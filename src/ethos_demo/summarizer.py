@@ -1,4 +1,10 @@
-"""Streaming EHR summary generator backed by a chat LLM."""
+"""Two-stage streaming EHR summary generator backed by a chat LLM.
+
+Stage 1 (optional): Summarize the patient's past medical history via a
+    non-streaming LLM call. Skipped when there are no past-history tokens.
+Stage 2: Stream a present-event summary that incorporates the past-history
+    summary (or a first-encounter note).
+"""
 
 import logging
 import threading
@@ -8,12 +14,14 @@ from typing import TYPE_CHECKING, ClassVar
 import yaml
 from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
 
-from ethos_demo.client import stream_chat_completion
+from ethos_demo.client import send_chat_completion, stream_chat_completion
 from ethos_demo.config import DEFAULT_BASE_URL, PROMPTS_DIR
 from ethos_demo.data import (
+    format_tokens_as_dicts,
     get_last_24h_history,
     get_patient_demographics,
     get_stay_history,
+    get_timeline_times_us,
     get_triage_history,
 )
 from ethos_demo.scenarios import Scenario
@@ -23,6 +31,11 @@ _logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from ethos.datasets import InferenceDataset
 
+_NO_PAST_HISTORY = (
+    "This patient's prior medical history is not known because this is "
+    "their first encounter with our healthcare system."
+)
+
 
 class SummaryGenerator:
     """Build an LLM prompt from patient data, stream the response, and surface status updates.
@@ -30,12 +43,6 @@ class SummaryGenerator:
     Designed to be stored in session state. The UI reads ``running``,
     ``status``, and ``text`` at render time instead of relying on callbacks.
     """
-
-    _STAGES: ClassVar[list[tuple[str, float]]] = [
-        ("Pulling records…", 2.0),
-        ("Reading…", 1.5),
-        ("Summarizing…", 0.0),
-    ]
 
     _HISTORY_FN: ClassVar[dict] = {
         Scenario.TRIAGE: get_triage_history,
@@ -103,46 +110,133 @@ class SummaryGenerator:
     def _cancelled(self) -> bool:
         return self._cancel_event.is_set()
 
-    def _build_messages(self) -> list[dict[str, str]]:
-        demographics = get_patient_demographics(self.dataset, self.selected_idx)
-        history_fn = self._HISTORY_FN[self.scenario]
-        timeline_events = history_fn(self.dataset, self.selected_idx)
-        _logger.debug("EHR summary event tokens (%s): %s", self.scenario, timeline_events)
+    def _wait(self, seconds: float) -> None:
+        scaled = seconds * (1.0 if self.enable_thinking else 0.2)
+        if scaled > 0:
+            time.sleep(scaled)
 
-        with open(PROMPTS_DIR / "ehr_summary.yaml") as f:
-            prompt_tpl = yaml.safe_load(f)
-
-        fmt_kwargs = {
-            "scenario_context": self.scenario_context,
+    @staticmethod
+    def _fmt_demographics(
+        demographics: dict[str, str],
+        scenario_context: str | None = None,
+    ) -> dict[str, str]:
+        fmt: dict[str, str] = {
             "marital_status": demographics.get("Marital Status", "unknown"),
             "race": demographics.get("Race", "unknown"),
             "gender": demographics.get("Gender", "unknown"),
             "age": demographics.get("Age", "unknown"),
-            "timeline_events": timeline_events,
         }
+        if scenario_context is not None:
+            fmt["scenario_context"] = scenario_context
+        return fmt
+
+    def _build_past_history_messages(
+        self, past_dicts: list[dict], fmt: dict[str, str]
+    ) -> list[dict[str, str]]:
+        with open(PROMPTS_DIR / "past_history.yaml") as f:
+            tpl = yaml.safe_load(f)
+        kwargs = {**fmt, "past_timeline_events": past_dicts}
         return [
-            {"role": "system", "content": prompt_tpl["system"].format(**fmt_kwargs)},
-            {"role": "user", "content": prompt_tpl["user"].format(**fmt_kwargs)},
+            {"role": "system", "content": tpl["system"].format(**kwargs)},
+            {"role": "user", "content": tpl["user"].format(**kwargs)},
         ]
 
-    def _run(self) -> None:
-        messages = self._build_messages()
+    def _build_present_messages(
+        self, present_dicts: list[dict], past_summary: str, fmt: dict[str, str]
+    ) -> list[dict[str, str]]:
+        with open(PROMPTS_DIR / "ehr_summary.yaml") as f:
+            tpl = yaml.safe_load(f)
+        kwargs = {
+            **fmt,
+            "past_history_summary": past_summary,
+            "timeline_events": present_dicts,
+        }
+        return [
+            {"role": "system", "content": tpl["system"].format(**kwargs)},
+            {"role": "user", "content": tpl["user"].format(**kwargs)},
+        ]
 
-        time_scale = 1.0 if self.enable_thinking else 0.2
-        for label, duration in self._STAGES:
+    @staticmethod
+    def _strip_think(text: str, enable_thinking: bool) -> str:
+        """Remove the <think>...</think> block if present."""
+        if not enable_thinking:
+            return text
+        if "</think>" in text:
+            return text.split("</think>", 1)[1].strip()
+        return ""
+
+    def _run(self) -> None:
+        # ── 1. Split & format timeline ──────────────────────────
+        self._status = "Pulling records…"
+        self._wait(2.0)
+        if self._cancelled():
+            return
+
+        history_fn = self._HISTORY_FN[self.scenario]
+        past_tokens, present_tokens = history_fn(self.dataset, self.selected_idx)
+
+        self._status = "Reading…"
+        self._wait(1.5)
+        if self._cancelled():
+            return
+
+        past_dicts = format_tokens_as_dicts(past_tokens)
+        present_dicts = format_tokens_as_dicts(present_tokens)
+
+        timeline_start_us, _prediction_us = get_timeline_times_us(
+            self.dataset,
+            self.selected_idx,
+        )
+        past_demo = get_patient_demographics(
+            self.dataset,
+            self.selected_idx,
+            reference_time_us=timeline_start_us,
+        )
+        present_demo = get_patient_demographics(self.dataset, self.selected_idx)
+
+        past_fmt = self._fmt_demographics(past_demo)
+        present_fmt = self._fmt_demographics(present_demo, self.scenario_context)
+
+        _logger.debug(
+            "Timeline split (%s): %d past events, %d present events",
+            self.scenario,
+            len(past_dicts),
+            len(present_dicts),
+        )
+
+        # ── 2. Stage 1: Summarize past history (non-streaming) ──
+        if past_dicts:
+            self._status = "Reviewing past history…"
             if self._cancelled():
                 return
-            self._status = label
-            time.sleep(duration * time_scale)
+
+            past_messages = self._build_past_history_messages(past_dicts, past_fmt)
+            raw = send_chat_completion(
+                past_messages,
+                model=self.model_id,
+                base_url=self.base_url,
+                enable_thinking=self.enable_thinking,
+            )
+            past_summary = self._strip_think(raw, self.enable_thinking)
+            _logger.debug("Past history summary: %s", past_summary)
+        else:
+            past_summary = _NO_PAST_HISTORY
 
         if self._cancelled():
             return
+
+        # ── 3. Stage 2: Stream present summary ──────────────────
+        self._status = "Focusing on present…"
+        if self._cancelled():
+            return
+
+        present_messages = self._build_present_messages(present_dicts, past_summary, present_fmt)
 
         full_text = ""
         think_done = not self.enable_thinking
 
         stream = stream_chat_completion(
-            messages,
+            present_messages,
             model=self.model_id,
             base_url=self.base_url,
             enable_thinking=self.enable_thinking,

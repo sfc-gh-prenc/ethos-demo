@@ -6,8 +6,10 @@ from collections import Counter
 from datetime import UTC, datetime, timedelta
 
 import numpy as np
+import polars as pl
 import streamlit as st
 from ethos.datasets import InferenceDataset
+from ethos.utils import group_tokens_by_info
 
 from ethos_demo.config import TOKENIZED_DATASETS_DIR
 
@@ -55,14 +57,23 @@ def find_sample_idx(
     raise ValueError(f"No matching sample for patient {patient_id} at time {prediction_time}")
 
 
-def get_patient_demographics(dataset: InferenceDataset, idx: int) -> dict[str, str]:
-    """Return Gender, Race, Marital Status and Age for sample *idx*."""
+def get_patient_demographics(
+    dataset: InferenceDataset,
+    idx: int,
+    *,
+    reference_time_us: int | None = None,
+) -> dict[str, str]:
+    """Return Gender, Race, Marital Status and Age for sample *idx*.
+
+    If *reference_time_us* is given (microseconds), demographics are resolved at that point in time;
+    otherwise the prediction time is used.
+    """
     start_idx = dataset.start_indices[idx].item()
     patient_id = dataset.patient_id_at_idx[start_idx].item()
-    time_at_start = datetime.fromtimestamp(
-        int(dataset.times[start_idx].item() / 1e6),
-        tz=UTC,
-    ).replace(tzinfo=None)
+    ts_us = (
+        reference_time_us if reference_time_us is not None else int(dataset.times[start_idx].item())
+    )
+    ref_time = datetime.fromtimestamp(int(ts_us / 1e6), tz=UTC).replace(tzinfo=None)
     static = dataset.static_data[patient_id]
 
     demographics: dict[str, str] = {}
@@ -70,13 +81,12 @@ def get_patient_demographics(dataset: InferenceDataset, idx: int) -> dict[str, s
         code = data["code"][0]
 
         if code == "MEDS_BIRTH":
-            age_years = (time_at_start - data["time"][0]).days / 365.25
+            age_years = (ref_time - data["time"][0]).days / 365.25
             demographics["Age"] = f"{age_years:.0f}"
             continue
 
-        # Time-varying fields: pick the value at prediction time
         if len(data["code"]) > 1:
-            time_idx = _find_idx_of_last_le(data["time"], time_at_start)
+            time_idx = _find_idx_of_last_le(data["time"], ref_time)
             code = f"{prefix}//UNKNOWN" if time_idx == -1 else data["code"][time_idx]
 
         value = code.split("//", 1)[-1] if "//" in code else code
@@ -197,25 +207,109 @@ def _timeline_bounds(dataset: InferenceDataset, idx: int) -> tuple[int, int]:
     return timeline_start_idx, start_idx
 
 
-def _decode_window(dataset: InferenceDataset, lo: int, hi: int) -> str:
-    """Decode tokens in [lo, hi] and join non-None values."""
+def get_timeline_times_us(dataset: InferenceDataset, idx: int) -> tuple[int, int]:
+    """Return (timeline_start_us, prediction_time_us) for sample *idx*."""
+    timeline_start, start_idx = _timeline_bounds(dataset, idx)
+    return int(dataset.times[timeline_start].item()), int(dataset.times[start_idx].item())
+
+
+def _decode_tokens(dataset: InferenceDataset, lo: int, hi: int) -> list[str]:
+    """Decode tokens in [lo, hi] and return non-None values."""
     tokens = dataset.vocab.decode(dataset.tokens[lo : hi + 1])
-    return " ".join(t for t in tokens if t is not None)
+    return [t for t in tokens if t is not None]
 
 
-def get_triage_history(dataset: InferenceDataset, idx: int) -> str:
-    """Decode tokens sharing the same timestamp as the prediction time (triage events)."""
+def format_tokens_as_dicts(tokens: list[str]) -> list[dict]:
+    """Convert raw decoded tokens into a list of dicts (one per clinical event).
+
+    Uses the Polars pipeline ported from the ETHOS notebook to group related tokens, pivot
+    categories into columns, and strip null values.
+    """
+    if not tokens:
+        return []
+
+    groups = group_tokens_by_info(tokens)
+
+    df = (
+        pl.DataFrame([groups, pl.Series("token", tokens)])
+        .with_columns(
+            token=pl.when(pl.col("token").str.starts_with("BMI//"))
+            .then(pl.concat_list(pl.lit("BMI"), pl.col("token").str.slice(len("BMI//"))))
+            .otherwise(pl.concat_list("token"))
+        )
+        .explode("token")
+        .select(
+            "groups",
+            cat=pl.when(pl.col("token").str.starts_with("HOSPITAL//"))
+            .then(pl.col("token").str.splitn("//", 3).struct[1])
+            .otherwise(pl.col("token").str.splitn("//", 2).struct[0])
+            .replace("QUANTILE", "DECILE"),
+            token=pl.when(pl.col("token").str.starts_with("ICD"))
+            .then(pl.col("token").str.split("//").list.last())
+            .when(pl.col("token").str.starts_with("LAB//NAME//"))
+            .then(pl.col("token").str.slice(len("LAB//NAME//")).str.splitn("//", 1).struct[0])
+            .otherwise(pl.col("token").str.split("//").list.last()),
+        )
+        .with_columns(
+            cat=pl.when(pl.col("cat") == pl.col("token")).then(pl.lit("EVENT")).otherwise("cat")
+        )
+        .group_by("groups", maintain_order=True)
+        .agg(
+            "cat",
+            pl.when(pl.col("cat").is_in(["ATC", "ICD_CM"]))
+            .then(pl.col("token").str.join(""))
+            .otherwise(pl.col("token")),
+        )
+        .with_columns(
+            cat=pl.when(pl.col("token").list[0] == "BLOOD_PRESSURE")
+            .then(["VITAL", "SBP_DECILE", "DBP_DECILE"])
+            .otherwise("cat")
+        )
+        .explode("cat", "token")
+        .with_row_index("rid")
+        .pivot(
+            index=["rid", "groups"],
+            on="cat",
+            values="token",
+            aggregate_function="first",
+        )
+        .drop("rid")
+        .group_by("groups", maintain_order=True)
+        .agg(pl.exclude("groups").drop_nulls().first())
+        .drop("groups")
+    )
+
+    return [{k: v for k, v in d.items() if v is not None} for d in df.to_dicts()]
+
+
+def get_triage_history(dataset: InferenceDataset, idx: int) -> tuple[list[str], list[str]]:
+    """Return (past_tokens, present_tokens) for a triage scenario.
+
+    Present = tokens sharing the same timestamp as prediction time. Past = everything before that
+    timestamp.
+    """
     timeline_start, start_idx = _timeline_bounds(dataset, idx)
     prediction_time_us = int(dataset.times[start_idx].item())
 
     times_slice = dataset.times[timeline_start : start_idx + 1]
     mask = (times_slice == prediction_time_us).nonzero(as_tuple=False)
     window_start = timeline_start + int(mask[0].item())
-    return _decode_window(dataset, window_start, start_idx)
+
+    past = (
+        _decode_tokens(dataset, timeline_start, window_start - 1)
+        if window_start > timeline_start
+        else []
+    )
+    present = _decode_tokens(dataset, window_start, start_idx)
+    return past, present
 
 
-def get_last_24h_history(dataset: InferenceDataset, idx: int) -> str:
-    """Decode the timeline tokens from the last 24 hours before prediction time."""
+def get_last_24h_history(dataset: InferenceDataset, idx: int) -> tuple[list[str], list[str]]:
+    """Return (past_tokens, present_tokens) for a hospital-admission scenario.
+
+    Present = tokens from the last 24 hours before prediction time. Past = everything before the
+    24-hour window.
+    """
     timeline_start, start_idx = _timeline_bounds(dataset, idx)
     prediction_time_us = int(dataset.times[start_idx].item())
     cutoff_us = prediction_time_us - _24H_US
@@ -223,16 +317,26 @@ def get_last_24h_history(dataset: InferenceDataset, idx: int) -> str:
     times_slice = dataset.times[timeline_start : start_idx + 1]
     first_in_window = int((times_slice >= cutoff_us).nonzero(as_tuple=False)[0].item())
     window_start = timeline_start + first_in_window
-    return _decode_window(dataset, window_start, start_idx)
+
+    past = (
+        _decode_tokens(dataset, timeline_start, window_start - 1)
+        if window_start > timeline_start
+        else []
+    )
+    present = _decode_tokens(dataset, window_start, start_idx)
+    return past, present
 
 
-def get_stay_history(dataset: InferenceDataset, idx: int) -> str:
-    """Decode tokens from the most recent HOSPITAL_ADMISSION to prediction time."""
+def get_stay_history(dataset: InferenceDataset, idx: int) -> tuple[list[str], list[str]]:
+    """Return (past_tokens, present_tokens) for a hospital-discharge scenario.
+
+    Present = tokens from the most recent HOSPITAL_ADMISSION to prediction time. Past = everything
+    before that admission.
+    """
     timeline_start, start_idx = _timeline_bounds(dataset, idx)
     token_ids = dataset.tokens[timeline_start : start_idx + 1]
     decoded = dataset.vocab.decode(token_ids)
 
-    # Walk backwards to find the most recent admission boundary
     admission_pos = None
     for i in range(len(decoded) - 1, -1, -1):
         if decoded[i] == "HOSPITAL_ADMISSION":
@@ -240,7 +344,14 @@ def get_stay_history(dataset: InferenceDataset, idx: int) -> str:
             break
 
     window_start = timeline_start + admission_pos if admission_pos is not None else timeline_start
-    return _decode_window(dataset, window_start, start_idx)
+
+    past = (
+        _decode_tokens(dataset, timeline_start, window_start - 1)
+        if window_start > timeline_start
+        else []
+    )
+    present = _decode_tokens(dataset, window_start, start_idx)
+    return past, present
 
 
 def get_sample_context_stats(dataset: InferenceDataset, idx: int) -> dict[str, str]:

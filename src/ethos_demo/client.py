@@ -129,6 +129,27 @@ async def stream_completion_async(
         await stream.close()
 
 
+def send_chat_completion(
+    messages: list[dict[str, str]],
+    *,
+    model: str,
+    base_url: str = DEFAULT_BASE_URL,
+    enable_thinking: bool = False,
+    **kwargs,
+) -> str:
+    """Send a non-streaming chat completion and return the full response text."""
+    client = get_client(base_url)
+    extra_body = kwargs.pop("extra_body", {})
+    extra_body["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
+    response = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        extra_body=extra_body,
+        **kwargs,
+    )
+    return response.choices[0].message.content
+
+
 def stream_chat_completion(
     messages: list[dict[str, str]],
     *,
