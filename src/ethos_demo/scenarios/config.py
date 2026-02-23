@@ -50,7 +50,7 @@ _COMMON_STOP = (SpecialToken.DEATH, SpecialToken.TIMELINE_END)
 
 SCENARIOS: dict[Scenario, ScenarioConfig] = {
     Scenario.TRIAGE: ScenarioConfig(
-        description="Triage \u2014 patient came to ED and was triaged",
+        description="Patient presents to ED and is triaged",
         dataset=Task.ED_HOSPITALIZATION,
         stop_tokens=(SpecialToken.ICU_ADMISSION, *_COMMON_STOP),
         outcomes=(
@@ -78,7 +78,7 @@ SCENARIOS: dict[Scenario, ScenarioConfig] = {
         history_fn=get_triage_history,
     ),
     Scenario.HOSPITAL_ADMISSION: ScenarioConfig(
-        description="Admission \u2014 patient was admitted to hospital",
+        description="Patient is admitted to hospital",
         dataset=Task.ICU_ADMISSION,
         stop_tokens=(SpecialToken.DISCHARGE, *_COMMON_STOP),
         outcomes=(
@@ -103,7 +103,7 @@ SCENARIOS: dict[Scenario, ScenarioConfig] = {
         history_fn=get_last_36h_history,
     ),
     Scenario.HOSPITAL_DISCHARGE: ScenarioConfig(
-        description="Discharge \u2014 patient was discharged from hospital",
+        description="Patient is discharged from hospital",
         dataset=Task.READMISSION,
         stop_tokens=(SpecialToken.ADMISSION, *_COMMON_STOP),
         outcomes=(

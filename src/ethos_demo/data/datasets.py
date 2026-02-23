@@ -91,12 +91,12 @@ def build_sample_labels(dataset: InferenceDataset, indices: np.ndarray) -> list[
     labels: list[tuple[int, str]] = []
     for i, pid in zip(indices, patient_ids, strict=False):
         x, _y = dataset[int(i)]
-        n_events = len(x["input_ids"])
+        n_events = len(x["input_ids"]) - dataset.static_ctx_size
         if pid_counts[pid] > 1:
             order = get_admission_order(dataset, int(i))
-            label = f"Patient {pid} — Case #{order} ({n_events} events)"
+            label = f"Patient {pid} — Case #{order} ({n_events:,} events)"
         else:
-            label = f"Patient {pid} ({n_events} events)"
+            label = f"Patient {pid} ({n_events:,} events)"
         labels.append((int(i), label))
 
     return labels

@@ -62,6 +62,10 @@ _GLOBAL_CSS = (
     "{padding:0!important;min-height:0!important}"
     ".st-key-ai_working_bar span[data-testid='stIconMaterial']"
     "{animation:_spin .7s linear infinite}"
+    ".st-key-sel_ds label p,"
+    ".st-key-sel_sc label p,"
+    ".st-key-sel_pt label p"
+    "{font-size:0.95rem}"
 )
 st.markdown(f"<style>{_GLOBAL_CSS}</style>", unsafe_allow_html=True)
 
@@ -198,7 +202,9 @@ dataset_names = (
 col_ds, _col_ds_r = st.columns(2)
 with col_ds:
     dataset_name = (
-        st.selectbox("Tokenized dataset", options=dataset_names) if dataset_names else None
+        st.selectbox("Tokenized datasets", options=dataset_names, key="sel_ds")
+        if dataset_names
+        else None
     )
     if not dataset_names:
         st.warning(f"No datasets found in `{TOKENIZED_DATASETS_DIR}`.")
@@ -206,11 +212,12 @@ with col_ds:
 col_sc, col_pt = st.columns(2)
 with col_sc:
     scenario = st.selectbox(
-        "Clinical Scenario",
+        "Clinical Scenarios",
         options=list(Scenario),
         format_func=lambda s: SCENARIOS[s].description,
         index=None,
         placeholder="Choose scenario",
+        key="sel_sc",
     )
 
 selected_label = None
@@ -227,7 +234,7 @@ if dataset_name and scenario:
 
     label_to_idx = {label: idx for idx, label in labels}
     with col_pt:
-        selected_label = st.selectbox("Patient", options=list(label_to_idx))
+        selected_label = st.selectbox("Cases", options=list(label_to_idx), key="sel_pt")
 
     if selected_label is not None:
         selected_idx = label_to_idx[selected_label]
