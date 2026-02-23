@@ -132,7 +132,13 @@ def get_sample_context_stats(dataset: InferenceDataset, idx: int) -> dict[str, s
 
 
 def format_timedelta(td: timedelta) -> str:
+    total_seconds = td.total_seconds()
+    if total_seconds == 0:
+        return "\u2013"
     total_days = td.days
+    if total_days < 1:
+        hours = int(total_seconds // 3600)
+        return f"{hours}h"
     total_months = round(total_days / 30.44)
     years, months = divmod(total_months, 12)
     if years > 0:

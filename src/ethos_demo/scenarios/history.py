@@ -66,11 +66,10 @@ def _build_split(
 
     if window_start > timeline_start:
         past = _decode_tokens(dataset, timeline_start, window_start - 1)
+        past_span = _time_span(dataset, timeline_start, window_start - 1)
     else:
         past = []
-
-    # History spans the entire record up to prediction time (present day)
-    past_span = _time_span(dataset, timeline_start, start_idx)
+        past_span = timedelta(0)
 
     if window_start <= start_idx:
         present = _decode_tokens(dataset, window_start, start_idx)

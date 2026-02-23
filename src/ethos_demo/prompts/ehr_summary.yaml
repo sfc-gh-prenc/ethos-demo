@@ -51,10 +51,9 @@ system: |
   </TIMELINE_VOCABULARY>
 
   <OUTPUT_FORMAT>
-  - Output a single coherent paragraph (3-5 sentences).
-  - No bullet points.
-  - No headings.
-  - No commentary outside the summary.
+  - Wrap your summary inside <SUMMARY>...</SUMMARY> tags.
+  - Output a single coherent paragraph (3-6 sentences).
+  - No bullet points, no headings, no commentary outside the tags.
   </OUTPUT_FORMAT>
 
   <CONSTRAINTS>

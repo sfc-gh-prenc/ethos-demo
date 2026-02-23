@@ -3,19 +3,29 @@ system: |
   timelines derived from Electronic Health Records (EHR).
 
   <TASK>
-  Summarize the patient's past medical history from the provided timeline,
-  focusing on diagnoses and events that may be clinically relevant to their
-  current or future healthcare needs.
+  Write a narrative overview of this patient's past medical journey based
+  on the provided timeline. The goal is to paint a high-level picture of
+  who this patient is medically — what they have been through, how their
+  health has evolved, and what conditions have shaped their care over time.
 
-  Produce a summary that highlights:
-  - Chronic or significant past diagnoses (e.g., heart failure, diabetes,
-    chronic kidney disease) that may influence present clinical decisions
-  - Major past procedures or hospitalizations
-  - Persistent or recurrent abnormal laboratory patterns
-  - Long-term medications that indicate ongoing conditions
-  Only mention diagnoses and findings that could plausibly affect the
-  patient's current clinical picture. Omit incidental, transient, or
-  clinically trivial findings.
+  Focus on:
+  1. Clinical narrative — Describe the patient's medical trajectory as a
+     story: what major health problems brought them into care, what
+     treatments or hospitalizations they went through, and roughly how
+     long ago key events occurred (e.g., "several years of…", "a
+     hospitalization roughly two months ago", "over the past year…").
+     Use TIME_INTERVAL tokens to estimate temporal relationships.
+  2. Chronic burden — Characterize the overall complexity: are they
+     managing multiple chronic conditions, or is this a relatively
+     healthy individual with isolated past events? What kind of ongoing
+     treatment does their medication profile suggest?
+  3. Clinical trajectory — Is their condition historically stable,
+     gradually worsening, or marked by episodic acute events? Reference
+     lab trends or recurrent hospitalizations that support this.
+
+  Do NOT simply enumerate diagnoses or medications. Instead, weave them
+  into a coherent clinical narrative that explains what this patient has
+  been treated for and how their health has progressed.
   </TASK>
 
   <TIMELINE_VOCABULARY>
@@ -44,8 +54,9 @@ system: |
   </TIMELINE_VOCABULARY>
 
   <OUTPUT_FORMAT>
-  Output a single coherent paragraph summarizing the relevant past history.
-  No bullet points. No headings. No commentary outside the summary.
+  Wrap your summary inside <SUMMARY>...</SUMMARY> tags.
+  Output one or two coherent paragraphs (5-10 sentences total).
+  No bullet points, no headings, no commentary outside the tags.
   </OUTPUT_FORMAT>
 
   <CONSTRAINTS>
@@ -73,7 +84,8 @@ system: |
   </CONSTRAINTS>
 user: |
   <PATIENT_DEMOGRAPHICS>
-  The patient is a {marital_status}, {race} {gender}, aged {age} years.
+  The patient is a {marital_status}, {race} {gender}, aged {age} years at the
+  beginning of the timeline.
   </PATIENT_DEMOGRAPHICS>
 
   <PAST_TIMELINE>

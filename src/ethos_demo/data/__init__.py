@@ -20,13 +20,14 @@ from .quantiles import (
     get_decile_ranges,
     load_quantiles,
 )
-from .tokens import format_tokens_as_dicts
+from .tokens import format_tokens_as_dicts, format_tokens_as_dicts_async
 
 __all__ = [
     "build_sample_labels",
     "find_sample_idx",
     "format_timedelta",
     "format_tokens_as_dicts",
+    "format_tokens_as_dicts_async",
     "get_admission_order",
     "get_allowed_token_ids",
     "get_decile_ranges",

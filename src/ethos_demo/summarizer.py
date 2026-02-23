@@ -6,8 +6,10 @@ Stage 2: Stream a present-event summary that incorporates the past-history
     summary (or a first-encounter note).
 """
 
+import asyncio
 import json
 import logging
+import re
 import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -19,7 +21,7 @@ from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ct
 
 from .client import ChatClient
 from .config import DEFAULT_BASE_URL, PROMPTS_DIR
-from .data import format_tokens_as_dicts, get_decile_ranges, get_patient_demographics
+from .data import format_tokens_as_dicts_async, get_decile_ranges, get_patient_demographics
 from .scenarios import SCENARIOS, Scenario, get_timeline_times_us
 
 _logger = logging.getLogger(__name__)
@@ -145,8 +147,16 @@ class SummaryGenerator:
 
     _T = TypeVar("_T")
 
+    _SUMMARY_RE = re.compile(r"<SUMMARY>(.*?)</SUMMARY>", re.DOTALL)
+
     def _cancelled(self) -> bool:
         return self._cancel_event.is_set()
+
+    @classmethod
+    def _extract_summary(cls, text: str) -> str:
+        """Extract content between <SUMMARY> tags, falling back to raw text."""
+        m = cls._SUMMARY_RE.search(text)
+        return m.group(1).strip() if m else text.strip()
 
     def _call_or_cancel(self, fn: Callable[..., _T], *args, **kwargs) -> _T | None:
         """Run *fn* off-thread, polling for cancellation every 0.2 s.
@@ -205,15 +215,6 @@ class SummaryGenerator:
             {"role": "user", "content": tpl["user"].format(**kwargs)},
         ]
 
-    @staticmethod
-    def _strip_think(text: str, enable_thinking: bool) -> str:
-        """Remove the <think>...</think> block if present."""
-        if not enable_thinking:
-            return text
-        if "</think>" in text:
-            return text.split("</think>", 1)[1].strip()
-        return ""
-
     def _handle_tool_call(self, name: str, args: dict) -> str:
         """Dispatch a tool call and return the JSON result string."""
         if name == "get_decile_ranges":
@@ -228,8 +229,13 @@ class SummaryGenerator:
         sc = SCENARIOS[self.scenario]
         split = sc.history_fn(self.dataset, self.selected_idx)
 
-        past_dicts = format_tokens_as_dicts(split.past_tokens)
-        present_dicts = format_tokens_as_dicts(split.present_tokens)
+        async def _format_both():
+            return await asyncio.gather(
+                format_tokens_as_dicts_async(split.past_tokens),
+                format_tokens_as_dicts_async(split.present_tokens),
+            )
+
+        past_dicts, present_dicts = asyncio.run(_format_both())
 
         timeline_start_us, _prediction_us = get_timeline_times_us(
             self.dataset,
@@ -266,11 +272,12 @@ class SummaryGenerator:
                 self._TOOL_SCHEMA,
                 self._handle_tool_call,
                 max_rounds=1,
+                finalize=True,
             )
             if result is None:
                 return
             _msgs, raw = result
-            past_summary = self._strip_think(raw, self._chat.enable_thinking)
+            past_summary = self._extract_summary(raw)
             _logger.debug("Past history summary: %s", past_summary)
         else:
             past_summary = _NO_PAST_HISTORY
@@ -294,37 +301,23 @@ class SummaryGenerator:
         resolved_messages, preflight_text = result
 
         if preflight_text:
-            self._text = (
-                self._strip_think(preflight_text, self._chat.enable_thinking).strip() or None
-            )
+            self._text = self._extract_summary(preflight_text) or None
             self._status = None
             return
 
         # Stream the final response with tool_choice="none"
         full_text = ""
-        think_done = not self._chat.enable_thinking
-
         stream = self._chat.stream(resolved_messages, tool_choice="none")
         try:
             for delta in stream:
                 if self._cancelled():
                     return
-
                 full_text += delta
-
-                if not think_done:
-                    if "</think>" in full_text:
-                        think_done = True
-                        full_text = full_text.split("</think>", 1)[1]
-                    else:
-                        continue
-
-                visible = full_text.strip()
-                if visible:
-                    self._text = visible
+                extracted = self._extract_summary(full_text)
+                if extracted and self._SUMMARY_RE.search(full_text):
+                    self._text = extracted
         finally:
             stream.close()
 
         self._status = None
-        if think_done:
-            self._text = full_text.strip() or None
+        self._text = self._extract_summary(full_text) or None
