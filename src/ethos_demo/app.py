@@ -115,12 +115,17 @@ with st.sidebar:
     #    a full rerun, updating button states in the main area) ─────
     st.header("Configuration")
 
+    def _strip_prefix(model_id: str) -> str:
+        for prefix in ("ethos/", "llm/"):
+            if model_id.startswith(prefix):
+                return model_id[len(prefix) :]
+        return model_id
+
     def _model_select(
         label: str,
         key: str,
         models: list[str],
         default: str | None = None,
-        placeholder: str = "Choose model ID",
     ) -> None:
         saved_key = f"_saved_{key}"
         current = st.session_state.get(key)
@@ -129,14 +134,13 @@ with st.sidebar:
 
         if models:
             prev = st.session_state.get(saved_key, default)
-            idx = models.index(prev) if prev and prev in models else None
-            if idx is not None:
-                st.session_state.pop(key, None)
+            idx = models.index(prev) if prev and prev in models else 0
+            st.session_state.pop(key, None)
             st.selectbox(
                 label,
                 options=models,
                 index=idx,
-                placeholder=placeholder,
+                format_func=_strip_prefix,
                 key=key,
             )
         else:
