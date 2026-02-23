@@ -6,8 +6,8 @@ from enum import StrEnum, auto
 
 import streamlit as st
 
-from ethos_demo.client import ModelInfo, check_health, list_models
-from ethos_demo.config import DEFAULT_MODEL_CONTEXT_SIZE, HEALTH_POLL_SECONDS
+from .client import ModelInfo, check_health, list_models
+from .config import DEFAULT_MODEL_CONTEXT_SIZE, HEALTH_POLL_SECONDS
 
 _logger = logging.getLogger(__name__)
 

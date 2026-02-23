@@ -171,6 +171,7 @@ def _start_summary(
     selected_idx: int,
     scenario: Scenario,
     sc,
+    dataset_name: str,
 ) -> None:
     """Launch EHR summary generation in a background thread."""
     old: SummaryGenerator | None = st.session_state.pop("_summarizer", None)
@@ -181,8 +182,8 @@ def _start_summary(
         dataset=ds,
         selected_idx=selected_idx,
         scenario=scenario,
-        scenario_context=sc.context,
-        model_id=backend.llm_model,
+        model=backend.llm_model,
+        dataset_name=dataset_name,
     )
     st.session_state["_summarizer"] = summarizer
     summarizer.start()
@@ -248,6 +249,7 @@ if dataset_name and scenario:
                     selected_idx=selected_idx,
                     scenario=scenario,
                     sc=sc,
+                    dataset_name=dataset_name,
                 )
 
         # Deferred auto-fire: model selected after patient was already chosen
@@ -264,6 +266,7 @@ if dataset_name and scenario:
                 selected_idx=selected_idx,
                 scenario=scenario,
                 sc=sc,
+                dataset_name=dataset_name,
             )
 
         # ── Demographics ──────────────────────────────────────────
@@ -408,11 +411,11 @@ if dataset_name and scenario:
                     dataset=ds,
                     sample_idx=selected_idx,
                     scenario=scenario,
-                    model_id=backend.ethos_model,
+                    model=backend.ethos_model,
+                    max_model_len=backend.ethos_max_model_len,
                     temperature=st.session_state.get(
                         "ethos_temperature", DEFAULT_ETHOS_TEMPERATURE
                     ),
-                    max_model_len=backend.ethos_max_model_len,
                     allowed_token_ids=get_allowed_token_ids(dataset_name, ds_task),
                 )
                 st.session_state["_estimator"] = new_est

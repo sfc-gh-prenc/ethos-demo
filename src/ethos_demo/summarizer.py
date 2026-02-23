@@ -6,6 +6,7 @@ Stage 2: Stream a present-event summary that incorporates the past-history
     summary (or a first-encounter note).
 """
 
+import json
 import logging
 import threading
 import time
@@ -14,17 +15,17 @@ from typing import TYPE_CHECKING, ClassVar
 import yaml
 from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
 
-from ethos_demo.client import send_chat_completion, stream_chat_completion
-from ethos_demo.config import DEFAULT_BASE_URL, PROMPTS_DIR
-from ethos_demo.data import (
-    format_tokens_as_dicts,
+from .client import ChatClient
+from .config import DEFAULT_BASE_URL, PROMPTS_DIR
+from .data import format_tokens_as_dicts, get_decile_ranges, get_patient_demographics
+from .scenarios import (
+    SCENARIOS,
+    Scenario,
     get_last_24h_history,
-    get_patient_demographics,
     get_stay_history,
     get_timeline_times_us,
     get_triage_history,
 )
-from ethos_demo.scenarios import Scenario
 
 _logger = logging.getLogger(__name__)
 
@@ -50,24 +51,70 @@ class SummaryGenerator:
         Scenario.HOSPITAL_DISCHARGE: get_stay_history,
     }
 
+    _TOOL_SCHEMA: ClassVar[list[dict]] = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_decile_ranges",
+                "description": (
+                    "Look up the actual numeric value ranges for each decile "
+                    "of specified measurements (labs, vitals, or BMI). Use "
+                    "this ONLY for measurements whose decile is clinically "
+                    "significant and where knowing the real range would help "
+                    "you describe the result more accurately (e.g., critically "
+                    "low vs mildly low). Do NOT query every measurement — "
+                    "only those where the distinction matters. Returns a "
+                    "mapping of decile labels (D1, D2, ...) to value ranges. "
+                    "Note: not all measurements have 10 deciles; when "
+                    "population values lack differentiation, fewer deciles "
+                    "are returned. For blood pressure, pass "
+                    "'BLOOD_PRESSURE' to get both SBP and DBP ranges."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "names": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Measurement names as they appear in the "
+                                "timeline, e.g. ['HEMOGLOBIN//G/DL//BLOOD', "
+                                "'HEART_RATE', 'BLOOD_PRESSURE', 'BMI']"
+                            ),
+                        },
+                    },
+                    "required": ["names"],
+                },
+            },
+        }
+    ]
+
     def __init__(
         self,
         *,
         dataset: "InferenceDataset",
         selected_idx: int,
         scenario: Scenario,
-        scenario_context: str,
-        model_id: str,
+        model: str,
+        dataset_name: str,
         base_url: str = DEFAULT_BASE_URL,
-        enable_thinking: bool = False,
     ) -> None:
+        """Create a summary generator for a single patient encounter.
+
+        Args:
+            dataset: Loaded ETHOS inference dataset.
+            selected_idx: Index of the patient sample inside *dataset*.
+            scenario: Clinical scenario that determines timeline splitting
+                and the context injected into the LLM prompt.
+            model: vLLM model ID for the chat LLM (e.g. ``"llm/llama-3.1"``).
+            dataset_name: Dataset directory name, used for quantile look-ups.
+            base_url: OpenAI-compatible API endpoint.
+        """
         self.dataset = dataset
         self.selected_idx = selected_idx
         self.scenario = scenario
-        self.scenario_context = scenario_context
-        self.model_id = model_id
-        self.base_url = base_url
-        self.enable_thinking = enable_thinking
+        self._chat = ChatClient(model=model, base_url=base_url)
+        self.dataset_name = dataset_name
 
         self._cancel_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -111,7 +158,7 @@ class SummaryGenerator:
         return self._cancel_event.is_set()
 
     def _wait(self, seconds: float) -> None:
-        scaled = seconds * (1.0 if self.enable_thinking else 0.2)
+        scaled = seconds * (1.0 if self._chat.enable_thinking else 0.2)
         if scaled > 0:
             time.sleep(scaled)
 
@@ -165,6 +212,13 @@ class SummaryGenerator:
             return text.split("</think>", 1)[1].strip()
         return ""
 
+    def _handle_tool_call(self, name: str, args: dict) -> str:
+        """Dispatch a tool call and return the JSON result string."""
+        if name == "get_decile_ranges":
+            result = get_decile_ranges(self.dataset_name, args["names"])
+            return json.dumps(result)
+        return json.dumps({"error": f"unknown tool: {name}"})
+
     def _run(self) -> None:
         # ── 1. Split & format timeline ──────────────────────────
         self._status = "Pulling records…"
@@ -195,7 +249,7 @@ class SummaryGenerator:
         present_demo = get_patient_demographics(self.dataset, self.selected_idx)
 
         past_fmt = self._fmt_demographics(past_demo)
-        present_fmt = self._fmt_demographics(present_demo, self.scenario_context)
+        present_fmt = self._fmt_demographics(present_demo, SCENARIOS[self.scenario].context)
 
         _logger.debug(
             "Timeline split (%s): %d past events, %d present events",
@@ -204,20 +258,20 @@ class SummaryGenerator:
             len(present_dicts),
         )
 
-        # ── 2. Stage 1: Summarize past history (non-streaming) ──
+        # ── 2. Stage 1: Summarize past history (with tool calling) ──
         if past_dicts:
             self._status = "Reviewing past history…"
             if self._cancelled():
                 return
 
             past_messages = self._build_past_history_messages(past_dicts, past_fmt)
-            raw = send_chat_completion(
+            _msgs, raw = self._chat.with_tools(
                 past_messages,
-                model=self.model_id,
-                base_url=self.base_url,
-                enable_thinking=self.enable_thinking,
+                self._TOOL_SCHEMA,
+                self._handle_tool_call,
+                max_rounds=1,
             )
-            past_summary = self._strip_think(raw, self.enable_thinking)
+            past_summary = self._strip_think(raw, self._chat.enable_thinking)
             _logger.debug("Past history summary: %s", past_summary)
         else:
             past_summary = _NO_PAST_HISTORY
@@ -225,22 +279,36 @@ class SummaryGenerator:
         if self._cancelled():
             return
 
-        # ── 3. Stage 2: Stream present summary ──────────────────
+        # ── 3. Stage 2: Present summary (tool loop then stream) ──
         self._status = "Focusing on present…"
         if self._cancelled():
             return
 
         present_messages = self._build_present_messages(present_dicts, past_summary, present_fmt)
 
-        full_text = ""
-        think_done = not self.enable_thinking
-
-        stream = stream_chat_completion(
+        # Let the model resolve tool calls first (non-streaming, single round)
+        resolved_messages, preflight_text = self._chat.with_tools(
             present_messages,
-            model=self.model_id,
-            base_url=self.base_url,
-            enable_thinking=self.enable_thinking,
+            self._TOOL_SCHEMA,
+            self._handle_tool_call,
+            max_rounds=1,
         )
+
+        if self._cancelled():
+            return
+
+        if preflight_text:
+            self._text = (
+                self._strip_think(preflight_text, self._chat.enable_thinking).strip() or None
+            )
+            self._status = None
+            return
+
+        # Stream the final response with tool_choice="none"
+        full_text = ""
+        think_done = not self._chat.enable_thinking
+
+        stream = self._chat.stream(resolved_messages, tool_choice="none")
         try:
             for delta in stream:
                 if self._cancelled():

@@ -46,6 +46,8 @@ def main():
         engine_kwargs={
             "tensor_parallel_size": LLM_GPUS,
             "gpu_memory_utilization": args.gpu_memory_utilization,
+            "enable_auto_tool_choice": True,
+            "tool_call_parser": "llama3_json",
         },
     )
 

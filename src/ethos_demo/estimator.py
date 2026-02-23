@@ -9,16 +9,16 @@ from datetime import timedelta
 from ethos.datasets import InferenceDataset
 from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
 
-from ethos_demo.client import send_raw_completion_async
-from ethos_demo.config import (
+from .client import CompletionClient
+from .config import (
     DEFAULT_BASE_URL,
     DEFAULT_MODEL_CONTEXT_SIZE,
     MAX_CONCURRENT_REQUESTS,
     N_COMPLETIONS,
     N_PER_REQUEST,
 )
-from ethos_demo.data import get_sample_prompt
-from ethos_demo.scenarios import SCENARIOS, OutcomeRule, Scenario
+from .data import get_sample_prompt
+from .scenarios import SCENARIOS, OutcomeRule, Scenario
 
 logger = logging.getLogger(__name__)
 
@@ -105,14 +105,12 @@ class StreamTracker:
             ):
                 self._outcomes[rule.name] = True
 
-        # Resolve outcomes whose time window has been exceeded
         for rule in self.rules:
             if self._outcomes[rule.name] is not None:
                 continue
             if rule.time_window is not None and self.accumulated_time > rule.time_window:
                 self._outcomes[rule.name] = False
 
-        # Check if max time exceeded
         if self.max_time is not None and self.accumulated_time > self.max_time:
             self._finalize()
             return
@@ -155,22 +153,39 @@ class OutcomeEstimator:
         dataset: InferenceDataset,
         sample_idx: int,
         scenario: Scenario,
-        model_id: str,
+        model: str,
         base_url: str = DEFAULT_BASE_URL,
-        temperature: float = 1.0,
         max_model_len: int = DEFAULT_MODEL_CONTEXT_SIZE,
+        temperature: float = 1.0,
         n_completions: int = N_COMPLETIONS,
         n_per_request: int = N_PER_REQUEST,
         max_concurrent: int = MAX_CONCURRENT_REQUESTS,
         allowed_token_ids: list[int] | None = None,
     ) -> None:
+        """Create an outcome estimator for a single patient encounter.
+
+        Args:
+            dataset: Loaded ETHOS inference dataset.
+            sample_idx: Index of the patient sample inside *dataset*.
+            scenario: Clinical scenario whose outcome rules are evaluated.
+            model: vLLM model ID for the ETHOS completion model.
+            base_url: OpenAI-compatible API endpoint.
+            max_model_len: Model context window size (used to derive ``max_tokens``).
+            temperature: Sampling temperature for completions.
+            n_completions: Total number of trajectories to generate.
+            n_per_request: Trajectories per HTTP request (``n`` parameter).
+            max_concurrent: Maximum concurrent requests in flight.
+            allowed_token_ids: If set, restrict generation to these token IDs.
+        """
         self.dataset = dataset
         self.sample_idx = sample_idx
         self.scenario = scenario
-        self.model_id = model_id
-        self.base_url = base_url
+        self._client = CompletionClient(
+            model=model,
+            base_url=base_url,
+            max_model_len=max_model_len,
+        )
         self.temperature = temperature
-        self.max_model_len = max_model_len
         self.n_completions = n_completions
         self.n_per_request = n_per_request
         self.max_concurrent = max_concurrent
@@ -268,15 +283,12 @@ class OutcomeEstimator:
             if self._is_cancelled():
                 return []
 
-            pairs = await send_raw_completion_async(
+            pairs = await self._client.send_async(
                 self._prompt,
                 n_input_tokens=self._n_input_tokens,
-                model=self.model_id,
-                base_url=self.base_url,
                 n=n,
                 stop=self._stop_tokens,
                 temperature=self.temperature,
-                max_model_len=self.max_model_len,
                 allowed_token_ids=self._allowed_token_ids,
             )
 
@@ -315,7 +327,7 @@ class OutcomeEstimator:
                 break
 
             done, pending = await asyncio.wait(
-                pending, timeout=0.2, return_when=asyncio.FIRST_COMPLETED
+                pending, timeout=1, return_when=asyncio.FIRST_COMPLETED
             )
             for future in done:
                 try:
