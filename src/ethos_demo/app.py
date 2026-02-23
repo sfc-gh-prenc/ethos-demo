@@ -16,6 +16,7 @@ from ethos_demo.config import (
 )
 from ethos_demo.data import (
     build_sample_labels,
+    get_allowed_token_ids,
     get_patient_bmi_group,
     get_patient_demographics,
     get_sample_context_stats,
@@ -407,6 +408,7 @@ if dataset_name and scenario:
                     temperature=st.session_state.get(
                         "ethos_temperature", DEFAULT_ETHOS_TEMPERATURE
                     ),
+                    allowed_token_ids=get_allowed_token_ids(dataset_name, ds_task),
                 )
                 st.session_state["_estimator"] = new_est
                 st.rerun(scope="fragment")

@@ -10,7 +10,12 @@ from ethos.datasets import InferenceDataset
 from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
 
 from ethos_demo.client import send_raw_completion_async
-from ethos_demo.config import DEFAULT_BASE_URL, MAX_CONCURRENT_STREAMS, N_STREAMS
+from ethos_demo.config import (
+    DEFAULT_BASE_URL,
+    MAX_CONCURRENT_REQUESTS,
+    N_COMPLETIONS,
+    N_PER_REQUEST,
+)
 from ethos_demo.data import get_sample_prompt
 from ethos_demo.scenarios import SCENARIOS, OutcomeRule, Scenario
 
@@ -152,8 +157,10 @@ class OutcomeEstimator:
         model_id: str,
         base_url: str = DEFAULT_BASE_URL,
         temperature: float = 1.0,
-        n_requests: int = N_STREAMS,
-        max_concurrent: int = MAX_CONCURRENT_STREAMS,
+        n_completions: int = N_COMPLETIONS,
+        n_per_request: int = N_PER_REQUEST,
+        max_concurrent: int = MAX_CONCURRENT_REQUESTS,
+        allowed_token_ids: list[int] | None = None,
     ) -> None:
         self.dataset = dataset
         self.sample_idx = sample_idx
@@ -161,8 +168,10 @@ class OutcomeEstimator:
         self.model_id = model_id
         self.base_url = base_url
         self.temperature = temperature
-        self.n_requests = n_requests
+        self.n_completions = n_completions
+        self.n_per_request = n_per_request
         self.max_concurrent = max_concurrent
+        self._allowed_token_ids = allowed_token_ids
 
         sc = SCENARIOS[scenario]
         self._rules = sc.outcomes
@@ -190,7 +199,7 @@ class OutcomeEstimator:
     def progress(self) -> tuple[int, int] | None:
         if self._completed == 0:
             return None
-        return (self._completed, self.n_requests)
+        return (self._completed, self.n_completions)
 
     @property
     def probabilities(self) -> dict[str, tuple[float, int, int] | None]:
@@ -251,34 +260,42 @@ class OutcomeEstimator:
     def _is_cancelled(self) -> bool:
         return self._cancel_event.is_set()
 
-    async def _request_one(self, sem: asyncio.Semaphore) -> StreamTracker:
-        tracker = StreamTracker(
-            rules=self._rules,
-            interval_estimates=self._interval_estimates,
-            max_time=self._max_time,
-        )
+    async def _request_batch(self, n: int, sem: asyncio.Semaphore) -> list[StreamTracker]:
         async with sem:
             if self._is_cancelled():
-                tracker.flush()
-                return tracker
+                return []
 
             pairs = await send_raw_completion_async(
                 self._prompt,
                 n_input_tokens=self._n_input_tokens,
                 model=self.model_id,
                 base_url=self.base_url,
+                n=n,
                 stop=self._stop_tokens,
                 temperature=self.temperature,
+                allowed_token_ids=self._allowed_token_ids,
             )
-            text, _finish = pairs[0]
-            tracker.process_chunk(text)
 
-        tracker.flush()
-        return tracker
+        trackers: list[StreamTracker] = []
+        for text, _finish in pairs:
+            t = StreamTracker(
+                rules=self._rules,
+                interval_estimates=self._interval_estimates,
+                max_time=self._max_time,
+            )
+            t.process_chunk(text)
+            t.flush()
+            trackers.append(t)
+        return trackers
 
     async def _run(self) -> None:
         sem = asyncio.Semaphore(self.max_concurrent)
-        futures = [asyncio.ensure_future(self._request_one(sem)) for _ in range(self.n_requests)]
+
+        n_http = -(-self.n_completions // self.n_per_request)  # ceil division
+        remainder = self.n_completions % self.n_per_request or self.n_per_request
+        batch_sizes = [self.n_per_request] * (n_http - 1) + [remainder]
+
+        futures = [asyncio.ensure_future(self._request_batch(bs, sem)) for bs in batch_sizes]
         pending = set(futures)
 
         while pending:
@@ -288,7 +305,7 @@ class OutcomeEstimator:
                 logger.debug(
                     "Estimation cancelled — %d/%d completed",
                     self._completed,
-                    self.n_requests,
+                    self.n_completions,
                 )
                 await asyncio.gather(*pending, return_exceptions=True)
                 break
@@ -298,15 +315,16 @@ class OutcomeEstimator:
             )
             for future in done:
                 try:
-                    tracker = future.result()
+                    trackers = future.result()
                 except Exception:
                     logger.debug("Request failed", exc_info=True)
-                    self._completed += 1
+                    self._completed += self.n_per_request
                     continue
 
-                self._completed += 1
-                for name, positive in tracker.outcomes.items():
-                    agg = self._results[name]
-                    agg.valid += 1
-                    if positive:
-                        agg.positives += 1
+                self._completed += len(trackers) if trackers else self.n_per_request
+                for tracker in trackers:
+                    for name, positive in tracker.outcomes.items():
+                        agg = self._results[name]
+                        agg.valid += 1
+                        if positive:
+                            agg.positives += 1

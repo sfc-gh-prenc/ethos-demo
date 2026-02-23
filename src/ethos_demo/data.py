@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 import numpy as np
 import polars as pl
 import streamlit as st
+from ethos.constants import SpecialToken
 from ethos.datasets import InferenceDataset
 from ethos.utils import group_tokens_by_info
 
@@ -20,6 +21,19 @@ logger = logging.getLogger(__name__)
 def load_dataset(dataset_name: str, task: str) -> InferenceDataset:
     input_dir = TOKENIZED_DATASETS_DIR / dataset_name / "test"
     return InferenceDataset.from_task(task, input_dir=input_dir)
+
+
+@st.cache_data
+def get_allowed_token_ids(dataset_name: str, task: str) -> list[int] | None:
+    """Return constrained-generation token IDs from code_counts.json, or None."""
+    counts_fp = TOKENIZED_DATASETS_DIR / dataset_name / "test" / "code_counts.json"
+    if not counts_fp.is_file():
+        return None
+    ds = load_dataset(dataset_name, task)
+    with counts_fp.open() as f:
+        codes = [c for c in json.load(f) if c != SpecialToken.TIMELINE_START]
+    ids = [i for i in ds.vocab.encode(codes) if i is not None]
+    return ids or None
 
 
 def sample_indices(

@@ -83,18 +83,22 @@ async def send_raw_completion_async(
     base_url: str = DEFAULT_BASE_URL,
     n: int = 1,
     stop: list[str] | None = None,
+    allowed_token_ids: list[int] | None = None,
     **kwargs,
 ) -> list[tuple[str, str]]:
     """Async version — send a completion request, return (text, finish_reason) per choice."""
     client = get_async_client(base_url)
     max_tokens = MODEL_CONTEXT_SIZE - n_input_tokens
+    extra_body: dict = {"include_stop_str_in_output": True}
+    if allowed_token_ids is not None:
+        extra_body["allowed_token_ids"] = allowed_token_ids
     response = await client.completions.create(
         model=model,
         prompt=prompt,
         n=n,
         stop=stop,
         max_tokens=max_tokens,
-        extra_body={"include_stop_str_in_output": True},
+        extra_body=extra_body,
         **kwargs,
     )
     return [(c.text, c.finish_reason) for c in response.choices]
