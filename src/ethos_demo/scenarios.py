@@ -49,12 +49,12 @@ SCENARIOS: dict[Scenario, ScenarioConfig] = {
                 "\U0001f3e5",
                 "Hospitalization",
                 frozenset({SpecialToken.ADMISSION}),
-                timedelta(days=2),
+                timedelta(hours=36),
             ),
             OutcomeRule(
                 "ed_critical_outcome",
                 "\U0001f6cf\ufe0f",
-                "Critical Event",
+                "12h Critical Event",
                 frozenset({SpecialToken.ICU_ADMISSION, SpecialToken.DEATH}),
                 timedelta(hours=12),
             ),
@@ -63,7 +63,7 @@ SCENARIOS: dict[Scenario, ScenarioConfig] = {
             "The patient is presenting to the Emergency Department. They are being registered "
             "and triaged. Vitals are being measured, acuity level is being assessed, and the "
             "clinical team is determining the urgency of care needed. "
-            "The timeline events below are from the triage encounter."
+            "The present timeline covers events from the triage encounter."
         ),
     ),
     Scenario.HOSPITAL_ADMISSION: ScenarioConfig(
@@ -88,7 +88,7 @@ SCENARIOS: dict[Scenario, ScenarioConfig] = {
             "The patient is being admitted to the hospital. The admitting team is reviewing "
             "the clinical picture, evaluating the need for ICU-level care, and prioritizing "
             "the initial workup. "
-            "The timeline events below cover the last 24 hours before admission."
+            "The present timeline covers the last 24 hours before admission."
         ),
     ),
     Scenario.HOSPITAL_DISCHARGE: ScenarioConfig(
@@ -115,7 +115,8 @@ SCENARIOS: dict[Scenario, ScenarioConfig] = {
             "The patient is being discharged from the hospital. The care team is reviewing "
             "the clinical course, assessing readiness for discharge, and evaluating the risk "
             "of short-term and medium-term readmission. "
-            "The timeline events below cover the entire hospital stay from admission to discharge."
+            "The present timeline covers events from the entire hospital stay from admission "
+            "to discharge."
         ),
     ),
 }
