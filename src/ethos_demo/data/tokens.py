@@ -31,7 +31,6 @@ async def format_tokens_as_dicts_async(
         return []
 
     groups = group_tokens_by_info(tokens)
-    groups = groups[: len(tokens)]
 
     df = await (
         pl.LazyFrame([groups, pl.Series("token", tokens)])
@@ -42,7 +41,7 @@ async def format_tokens_as_dicts_async(
         )
         .explode("token")
         .select(
-            "groups",
+            "group",
             cat=pl.when(pl.col("token").str.starts_with("HOSPITAL//"))
             .then(pl.col("token").str.splitn("//", 3).struct[1])
             .otherwise(pl.col("token").str.splitn("//", 2).struct[0])
@@ -56,7 +55,7 @@ async def format_tokens_as_dicts_async(
         .with_columns(
             cat=pl.when(pl.col("cat") == pl.col("token")).then(pl.lit("EVENT")).otherwise("cat")
         )
-        .group_by("groups", maintain_order=True)
+        .group_by("group", maintain_order=True)
         .agg(
             "cat",
             pl.when(pl.col("cat").is_in(["ATC", "ICD_CM"]))
@@ -65,28 +64,34 @@ async def format_tokens_as_dicts_async(
         )
         .with_columns(
             cat=pl.when(pl.col("token").list[0] == "BLOOD_PRESSURE")
-            .then(["VITAL", "SBP_DECILE", "DBP_DECILE"])
+            .then(
+                pl.concat_list(
+                    pl.lit("VITAL"),
+                    pl.when(pl.col("cat").list.len() >= 2).then(pl.lit("SBP_DECILE")),
+                    pl.when(pl.col("cat").list.len() >= 3).then(pl.lit("DBP_DECILE")),
+                )
+            )
             .otherwise("cat")
         )
         .explode("cat", "token")
-        .with_row_index("rid")
         .collect_async()
     )
 
     cats = set(df["cat"].unique().to_list())
 
     lf = (
-        df.pivot(
-            index=["rid", "groups"],
+        df.with_row_index("rid")
+        .pivot(
+            index=["rid", "group"],
             on="cat",
             values="token",
             aggregate_function="first",
         )
         .lazy()
         .drop("rid")
-        .group_by("groups", maintain_order=True)
-        .agg(pl.exclude("groups").drop_nulls().first())
-        .drop("groups")
+        .group_by("group", maintain_order=True)
+        .agg(pl.exclude("group").drop_nulls().first())
+        .drop("group")
     )
 
     if decile_maps:
