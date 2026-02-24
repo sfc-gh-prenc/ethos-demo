@@ -452,7 +452,7 @@ if dataset_name and scenario:
         # ── Outcome estimation ────────────────────────────────────
         st.divider()
 
-        @st.fragment(run_every=timedelta(seconds=1))
+        @st.fragment(run_every=timedelta(milliseconds=500))
         def _outcomes_fragment():
             estimator: OutcomeEstimator | None = st.session_state.get("_estimator")
             estimating = estimator is not None and estimator.running

@@ -20,7 +20,12 @@ from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ct
 
 from .client import ChatClient
 from .config import DEFAULT_BASE_URL, PROMPTS_DIR
-from .data import build_decile_label_maps, format_tokens_as_dicts_async, get_patient_demographics
+from .data import (
+    build_decile_label_maps,
+    format_events_text,
+    format_tokens_as_dicts_async,
+    get_patient_demographics,
+)
 from .scenarios import SCENARIOS, Scenario, get_timeline_times_us
 
 _logger = logging.getLogger(__name__)
@@ -155,7 +160,7 @@ class SummaryGenerator:
     ) -> list[dict[str, str]]:
         with open(PROMPTS_DIR / "past_history.yaml") as f:
             tpl = yaml.safe_load(f)
-        kwargs = {**fmt, "past_timeline_events": past_dicts}
+        kwargs = {**fmt, "past_timeline_events": format_events_text(past_dicts)}
         return [
             {"role": "system", "content": tpl["system"].format(**kwargs)},
             {"role": "user", "content": tpl["user"].format(**kwargs)},
@@ -169,7 +174,7 @@ class SummaryGenerator:
         kwargs = {
             **fmt,
             "past_history_summary": past_summary,
-            "timeline_events": present_dicts,
+            "timeline_events": format_events_text(present_dicts),
         }
         return [
             {"role": "system", "content": tpl["system"].format(**kwargs)},

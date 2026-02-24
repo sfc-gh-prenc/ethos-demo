@@ -21,7 +21,7 @@ from .config import (
     N_EXPLANATION_TRAJECTORIES,
     PROMPTS_DIR,
 )
-from .data import build_decile_label_maps, format_tokens_as_dicts_async
+from .data import build_decile_label_maps, format_events_text, format_tokens_as_dicts_async
 from .scenarios import OutcomeRule, Scenario
 
 _logger = logging.getLogger(__name__)
@@ -288,7 +288,7 @@ class TrajectoryExplainer:
                     **self._demographics,
                     "past_summary": self._past_summary,
                     "present_summary": self._present_summary,
-                    "trajectory_events": dicts,
+                    "trajectory_events": format_events_text(dicts),
                     "outcome_title": self._rule.title,
                     "outcome_label": label,
                     "outcome_guidance": guidance,

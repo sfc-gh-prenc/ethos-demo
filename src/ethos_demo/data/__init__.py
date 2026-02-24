@@ -20,12 +20,13 @@ from .quantiles import (
     build_decile_label_maps,
     load_quantiles,
 )
-from .tokens import format_tokens_as_dicts, format_tokens_as_dicts_async
+from .tokens import format_events_text, format_tokens_as_dicts, format_tokens_as_dicts_async
 
 __all__ = [
     "build_decile_label_maps",
     "build_sample_labels",
     "find_sample_idx",
+    "format_events_text",
     "format_timedelta",
     "format_tokens_as_dicts",
     "format_tokens_as_dicts_async",
