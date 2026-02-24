@@ -1,23 +1,15 @@
 """Polars pipeline for converting raw decoded tokens into structured dicts."""
 
 import asyncio
-from typing import Any
 
 import polars as pl
+import polars.selectors as cs
 from ethos.utils import group_tokens_by_info
 
 
-def format_events_text(events: list[dict[str, Any]]) -> str:
+def format_events_text(events: list[dict]) -> str:
     """Render a list of event dicts as a prompt-ready string (one dict per line)."""
-
-    def _fmt_val(v: Any) -> str:
-        if isinstance(v, float):
-            return f"{v:.3f}".rstrip("0").rstrip(".")
-        return repr(v)
-
-    return "\n".join(
-        "{" + ", ".join(f"{k!r}: {_fmt_val(v)}" for k, v in d.items()) + "}" for d in events
-    )
+    return ",\n".join(str(d) for d in events)
 
 
 def format_tokens_as_dicts(
@@ -106,6 +98,7 @@ async def format_tokens_as_dicts_async(
         .group_by("group", maintain_order=True)
         .agg(pl.exclude("group").drop_nulls().first())
         .drop("group")
+        .select(~cs.contains("DECILE"), cs.contains("DECILE"))
     )
 
     if decile_maps:

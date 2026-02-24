@@ -28,15 +28,20 @@ def _inner_breaks(raw_breaks: list[float]) -> list[float]:
     return raw_breaks[:1]
 
 
+def _fmt_break(x: float) -> str:
+    """Format a quantile break value, rounding off float32 artifacts."""
+    return f"{round(x, 3):g}"
+
+
 def _format_decile_label(inner: list[float], q_num: int, total_deciles: int) -> str:
     """Return a human-readable range label for decile *q_num* (1-based)."""
     if total_deciles == 1:
-        return f"= {inner[0]:g}"
+        return f"= {_fmt_break(inner[0])}"
     if q_num == 1:
-        return f"< {inner[0]:g}"
+        return f"< {_fmt_break(inner[0])}"
     if q_num > len(inner):
-        return f">= {inner[-1]:g}"
-    return f"{inner[q_num - 2]:g} - {inner[q_num - 1]:g}"
+        return f">= {_fmt_break(inner[-1])}"
+    return f"{_fmt_break(inner[q_num - 2])} - {_fmt_break(inner[q_num - 1])}"
 
 
 @st.cache_data
