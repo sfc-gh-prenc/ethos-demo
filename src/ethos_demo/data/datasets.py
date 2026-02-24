@@ -35,11 +35,23 @@ def sample_indices(
     dataset: InferenceDataset,
     n: int,
     seed: int,
+    min_events: int = 100,
 ) -> np.ndarray:
-    """Sample `n` indices from *dataset*."""
-    total = len(dataset)
+    """Sample `n` indices from *dataset*, keeping only samples with enough history."""
+    eligible = np.array(
+        [i for i in range(len(dataset)) if _n_timeline_tokens(dataset, i) >= min_events]
+    )
+    if len(eligible) == 0:
+        eligible = np.arange(len(dataset))
     np.random.seed(seed)
-    return np.random.choice(total, min(n, total), replace=False)
+    return np.random.choice(eligible, min(n, len(eligible)), replace=False)
+
+
+def _n_timeline_tokens(dataset: InferenceDataset, idx: int) -> int:
+    """Number of tokens in the timeline window for sample *idx*."""
+    start_idx = dataset.start_indices[idx].item()
+    timeline_start = dataset.patient_offset_at_idx[start_idx].item()
+    return min(start_idx - timeline_start + 1, dataset.timeline_size)
 
 
 def get_sample_identity(dataset: InferenceDataset, idx: int) -> tuple[int, int]:
