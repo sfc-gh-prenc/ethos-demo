@@ -69,7 +69,7 @@ async def format_tokens_as_dicts_async(
                     pl.lit("VITAL"),
                     pl.when(pl.col("cat").list.len() >= 2).then(pl.lit("SBP_DECILE")),
                     pl.when(pl.col("cat").list.len() >= 3).then(pl.lit("DBP_DECILE")),
-                )
+                ).list.drop_nulls()
             )
             .otherwise("cat")
         )
