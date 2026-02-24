@@ -245,17 +245,21 @@ class SummaryGenerator:
         present_messages = self._build_present_messages(present_dicts, past_summary, present_fmt)
 
         full_text = ""
-        stream = self._chat.stream(present_messages)
+        tag_open = "<SUMMARY>"
+        stream = self._chat.stream(present_messages, stop=["</SUMMARY>"])
         try:
             for delta in stream:
                 if self._cancelled():
                     return
                 full_text += delta
-                extracted = self._extract_summary(full_text)
-                if extracted and self._SUMMARY_RE.search(full_text):
-                    self._text = extracted
+                if tag_open in full_text:
+                    self._status = None
+                    self._text = full_text.split(tag_open, 1)[1].strip()
         finally:
             stream.close()
 
         self._status = None
-        self._text = self._extract_summary(full_text) or None
+        if tag_open in full_text:
+            self._text = full_text.split(tag_open, 1)[1].strip() or None
+        else:
+            self._text = full_text.strip() or None

@@ -35,7 +35,6 @@ _TOKEN_GROUP_SIZES: dict[str, int] = {
     "ACUITY": 2,
 }
 
-_EXPLANATION_RE = re.compile(r"<EXPLANATION>(.*?)</EXPLANATION>", re.DOTALL)
 _SUMMARY_RE = re.compile(r"<SUMMARY>(.*?)</SUMMARY>", re.DOTALL)
 
 
@@ -388,17 +387,21 @@ class TrajectoryExplainer:
         ]
 
         full_text = ""
-        stream = self._chat.stream(messages)
+        tag_open = "<EXPLANATION>"
+        stream = self._chat.stream(messages, stop=["</EXPLANATION>"])
         try:
             for delta in stream:
                 if self._cancelled():
                     return
                 full_text += delta
-                extracted = self._extract_tag(_EXPLANATION_RE, full_text)
-                if _EXPLANATION_RE.search(full_text):
-                    self._text = extracted
+                if tag_open in full_text:
+                    self._status = None
+                    self._text = full_text.split(tag_open, 1)[1].strip()
         finally:
             stream.close()
 
         self._status = None
-        self._text = self._extract_tag(_EXPLANATION_RE, full_text) or None
+        if tag_open in full_text:
+            self._text = full_text.split(tag_open, 1)[1].strip() or None
+        else:
+            self._text = full_text.strip() or None
