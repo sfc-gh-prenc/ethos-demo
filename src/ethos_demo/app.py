@@ -24,7 +24,8 @@ from ethos_demo.data import (
     sample_indices,
 )
 from ethos_demo.estimator import OutcomeEstimator
-from ethos_demo.scenarios import SCENARIOS, Scenario
+from ethos_demo.explainer import TrajectoryExplainer
+from ethos_demo.scenarios import SCENARIOS, OutcomeRule, Scenario
 from ethos_demo.summarizer import SummaryGenerator
 from ethos_demo.utils import wilson_margin
 
@@ -39,12 +40,18 @@ _logger.propagate = False
 
 def _ai_working() -> bool:
     """True when any background AI task is running."""
-    return any(
+    if any(
         o is not None and o.running
         for o in [
             st.session_state.get("_summarizer"),
             st.session_state.get("_estimator"),
         ]
+    ):
+        return True
+    return any(
+        v is not None and v.running
+        for k, v in st.session_state.items()
+        if k.startswith("_explainer_")
     )
 
 
@@ -52,6 +59,7 @@ st.set_page_config(page_title="ETHOS Demo", layout="wide")
 
 _GLOBAL_CSS = (
     "@keyframes _spin{to{transform:rotate(360deg)}}"
+    "@keyframes _pulse{0%,100%{opacity:1}50%{opacity:.3}}"
     ".status-row{display:flex;align-items:center;gap:8px;height:28px}"
     ".status-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}"
     ".status-dot.ok{background:#4caf50}"
@@ -66,6 +74,24 @@ _GLOBAL_CSS = (
     ".st-key-sel_sc label p,"
     ".st-key-sel_pt label p"
     "{font-size:0.95rem}"
+    ".outcome-card{border:1px solid rgba(255,255,255,0.1);"
+    "border-radius:12px;padding:1.2em 0.6em;"
+    "text-align:center;transition:background .2s}"
+    ".outcome-card.active{background:rgba(255,255,255,0.04)}"
+    "div[class*='st-key-card_']{position:relative}"
+    "div[class*='st-key-expl_btn_']{"
+    "position:absolute!important;top:10px;right:10px;"
+    "z-index:10;width:auto!important}"
+    "div[class*='st-key-expl_btn_'] button{"
+    "padding:4px 6px!important;min-height:0!important;"
+    "background:transparent!important;border:none!important;"
+    "box-shadow:none!important;opacity:0.5}"
+    "div[class*='st-key-expl_btn_'] button span[data-testid='stIconMaterial']{"
+    "font-size:1.6em}"
+    "div[class*='st-key-expl_btn_'] button:hover{opacity:1}"
+    ".st-key-stop_expl_btn button{"
+    "padding:2px 8px!important;min-height:0!important;opacity:0.5}"
+    ".st-key-stop_expl_btn button:hover{opacity:1}"
 )
 st.markdown(f"<style>{_GLOBAL_CSS}</style>", unsafe_allow_html=True)
 
@@ -192,6 +218,73 @@ def _start_summary(
     summarizer.start()
 
 
+def _handle_explain_click(rule, estimator, sc, backend) -> None:
+    """React to a ?
+
+    / bulb click on an outcome card.
+    """
+    expl_key = f"_explainer_{rule.name}"
+    existing: TrajectoryExplainer | None = st.session_state.get(expl_key)
+
+    # Resume a previously stopped explainer to finish remaining summaries
+    if existing is not None and existing.can_resume:
+        st.session_state["_active_explanation"] = rule.name
+        existing.resume()
+        return
+
+    # Toggle display for an existing explainer (running or cached)
+    if existing is not None and (existing.running or existing.text):
+        if st.session_state.get("_active_explanation") == rule.name:
+            st.session_state.pop("_active_explanation", None)
+        else:
+            st.session_state["_active_explanation"] = rule.name
+        return
+
+    if not backend.has_llm_model:
+        return
+
+    probs = estimator.probabilities
+    entry = probs.get(rule.name)
+    if entry is None:
+        return
+    prob, k, n = entry
+    margin = wilson_margin(k, n)
+
+    summarizer: SummaryGenerator | None = st.session_state.get("_summarizer")
+    past_summary = (
+        summarizer.text
+        if summarizer and summarizer.text
+        else "Past history summary is not available."
+    )
+    present_summary = (
+        summarizer.text
+        if summarizer and summarizer.text
+        else "Present encounter summary is not available."
+    )
+    demographics = get_patient_demographics(estimator.dataset, estimator.sample_idx)
+    demo_ctx = {
+        "marital_status": demographics.get("Marital Status", "unknown"),
+        "race": demographics.get("Race", "unknown"),
+        "gender": demographics.get("Gender", "unknown"),
+        "age": demographics.get("Age", "unknown"),
+    }
+
+    explainer = TrajectoryExplainer(
+        outcome_rule=rule,
+        probability=prob,
+        margin=margin,
+        trajectories=estimator.trajectories,
+        past_summary=past_summary,
+        present_summary=present_summary,
+        demographics_context=demo_ctx,
+        scenario=estimator.scenario,
+        model=backend.llm_model,
+    )
+    st.session_state[expl_key] = explainer
+    st.session_state["_active_explanation"] = rule.name
+    explainer.start()
+
+
 # ── Main area ───────────────────────────────────────────────────────────────
 dataset_names = (
     sorted(p.name for p in TOKENIZED_DATASETS_DIR.iterdir() if p.is_dir())
@@ -244,10 +337,15 @@ if dataset_name and scenario:
         selection_changed = st.session_state.get("_last_selection") != current_key
         if selection_changed:
             st.session_state["_last_selection"] = current_key
-            # Cancel any in-flight estimation
+            # Cancel any in-flight estimation and explainers
             est: OutcomeEstimator | None = st.session_state.pop("_estimator", None)
             if est is not None:
                 est.cancel()
+            for _ek in [k for k in st.session_state if k.startswith("_explainer_")]:
+                old_expl = st.session_state.pop(_ek, None)
+                if old_expl is not None:
+                    old_expl.cancel()
+            st.session_state.pop("_active_explanation", None)
             # Auto-fire summary if LLM model available
             if backend.has_llm_model:
                 _start_summary(
@@ -359,14 +457,24 @@ if dataset_name and scenario:
             estimating = estimator is not None and estimator.running
             has_model = backend.has_ethos_model
 
+            # Detect any running explainer
+            running_expl: TrajectoryExplainer | None = None
+            for _r in sc.outcomes:
+                _e = st.session_state.get(f"_explainer_{_r.name}")
+                if _e is not None and _e.running:
+                    running_expl = _e
+                    break
+
             # ── Button row ────────────────────────────────────
             prog = estimator.progress if estimator else None
-            btn_col, _spacer = st.columns([1, 3])
+            stop_clicked = False
+
+            btn_col, expl_status_col = st.columns([1, 3])
             with btn_col, st.container(key="est_btn"):
                 if estimating:
                     pct = int(100 * prog[0] / prog[1]) if prog else 0
                     cancel_clicked = st.button(
-                        f"Cancel · {pct}%",
+                        f"Cancel \u00b7 {pct}%",
                         key="est_action_btn",
                         use_container_width=True,
                     )
@@ -394,40 +502,146 @@ if dataset_name and scenario:
                     unsafe_allow_html=True,
                 )
 
+            with expl_status_col:
+                if running_expl is not None:
+                    ep = running_expl.progress
+                    if ep is not None:
+                        status_text = running_expl.status or ""
+                        scol, xcol = st.columns([5, 1])
+                        with scol:
+                            st.markdown(
+                                f"<div style='padding-top:8px'>"
+                                f"<span style='color:gray;font-size:0.85em'>"
+                                f"\U0001f4a1 {status_text}</span></div>",
+                                unsafe_allow_html=True,
+                            )
+                        with xcol, st.container(key="stop_expl_btn"):
+                            stop_clicked = st.button("\u2715", key="stop_expl_action")
+
             # ── Outcome cards ─────────────────────────────────
             probs = estimator.probabilities if estimator else {}
+            has_trajectories = (
+                estimator is not None and not estimating and len(estimator.trajectories) > 0
+            )
+            active_expl = st.session_state.get("_active_explanation")
+
             card_cols = st.columns(len(sc.outcomes))
+            explain_clicked_rule: OutcomeRule | None = None
+
             for col, rule in zip(card_cols, sc.outcomes, strict=False):
-                with col:
-                    st.markdown(
-                        f"<div style='text-align:center'>"
-                        f"<span style='font-size:5em'>{rule.icon}</span><br>"
-                        f"<b style='font-size:1.3em'>{rule.title}</b></div>",
-                        unsafe_allow_html=True,
+                with col, st.container(key=f"card_{rule.name}"):
+                    expl_key = f"_explainer_{rule.name}"
+                    expl: TrajectoryExplainer | None = st.session_state.get(expl_key)
+                    is_running = expl is not None and expl.running
+                    in_final = (
+                        expl is not None
+                        and expl.progress is None
+                        and (expl.text is not None or expl.running)
+                        and expl.n_summarized > 0
                     )
+                    is_active = active_expl == rule.name and (
+                        in_final or (expl is not None and expl.text is not None)
+                    )
+
+                    active_cls = " active" if is_active else ""
+                    card_html = (
+                        f"<div class='outcome-card{active_cls}'>"
+                        f"<span style='font-size:5em'>{rule.icon}</span><br>"
+                        f"<b style='font-size:1.3em'>{rule.title}</b>"
+                    )
+
                     entry = probs.get(rule.name)
                     if entry is not None:
                         prob, k, n = entry
                         margin = wilson_margin(k, n)
-                        st.markdown(
-                            f"<div style='text-align:center;font-size:2em'>"
+                        card_html += (
+                            f"<div style='font-size:2em'>"
                             f"{prob:.0%}"
                             f"<span style='display:inline-block;width:0;"
                             f"overflow:visible;vertical-align:baseline'>"
                             f"<span style='font-size:0.42em;color:gray;"
                             f"margin-left:4px;white-space:nowrap'>"
-                            f"±{margin * 100:.1f}%</span></span></div>",
-                            unsafe_allow_html=True,
+                            f"\u00b1{margin * 100:.1f}%</span></span></div>"
                         )
                     else:
-                        st.markdown(
-                            "<div style='text-align:center;font-size:2em;color:gray'>???</div>",
-                            unsafe_allow_html=True,
+                        card_html += "<div style='font-size:2em;color:gray'>???</div>"
+
+                    card_html += "</div>"
+                    st.markdown(card_html, unsafe_allow_html=True)
+
+                    # Icon button overlaid at top-right corner via CSS
+                    if has_trajectories or (expl is not None and expl.text):
+                        btn_ico = (
+                            ":material/lightbulb:"
+                            if (expl and expl.text and not is_running)
+                            else ":material/help_outline:"
                         )
+                        with st.container(key=f"expl_btn_{rule.name}"):
+                            if st.button(
+                                "",
+                                icon=btn_ico,
+                                key=f"expl_click_{rule.name}",
+                            ):
+                                explain_clicked_rule = rule
+                        if is_running:
+                            st.markdown(
+                                f"<style>.st-key-expl_btn_{rule.name} button"
+                                f"{{animation:_pulse 1.2s ease-in-out infinite"
+                                f"!important;opacity:1!important}}</style>",
+                                unsafe_allow_html=True,
+                            )
+
+            # ── Explanation display area ──────────────────────
+            _expl_box = (
+                "<div style='min-height:100px;background:rgba(255,255,255,0.04);"
+                "border-radius:10px;padding:1em;margin-top:1em'>"
+                "<div style='font-size:1.25em;font-weight:600;"
+                "margin-bottom:0.3em'>Score Overview</div>"
+                "<div style='color:gray;font-size:0.95em;margin-bottom:0.6em'>"
+                "{icon} &ensp; {title}</div>"
+                "<div style='font-size:1.05em'>{msg}</div>"
+                "{footnote}"
+                "</div>"
+            )
+
+            if active_expl:
+                expl_key = f"_explainer_{active_expl}"
+                active_expl_obj: TrajectoryExplainer | None = st.session_state.get(expl_key)
+                if active_expl_obj is not None:
+                    # Show only once past the summarization phase
+                    in_final_phase = active_expl_obj.text is not None or (
+                        active_expl_obj.progress is None
+                        and active_expl_obj.running
+                        and active_expl_obj.n_summarized > 0
+                    )
+                    if in_final_phase:
+                        active_rule = next(
+                            (r for r in sc.outcomes if r.name == active_expl),
+                            None,
+                        )
+                        if active_rule:
+                            msg = active_expl_obj.text or active_expl_obj.status or ""
+                            n_used = active_expl_obj.n_summarized
+                            footnote = ""
+                            if n_used > 0 and active_expl_obj.text:
+                                footnote = (
+                                    "<div style='color:gray;font-size:0.75em;"
+                                    f"margin-top:0.5em'>Based on {n_used} "
+                                    "ETHOS trajectories</div>"
+                                )
+                            st.markdown(
+                                _expl_box.format(
+                                    icon=active_rule.icon,
+                                    title=active_rule.title,
+                                    msg=msg,
+                                    footnote=footnote,
+                                ),
+                                unsafe_allow_html=True,
+                            )
 
             if estimating and prog:
                 _logger.debug(
-                    "estimation %d/%d — %s",
+                    "estimation %d/%d \u2014 %s",
                     prog[0],
                     prog[1],
                     estimator.log_summary,
@@ -456,6 +670,16 @@ if dataset_name and scenario:
             # ── Cancel estimation ─────────────────────────────
             if estimating and cancel_clicked:
                 estimator.cancel()
+                st.rerun(scope="fragment")
+
+            # ── Handle explain button clicks ──────────────────
+            if explain_clicked_rule is not None:
+                _handle_explain_click(explain_clicked_rule, estimator, sc, backend)
+                st.rerun(scope="fragment")
+
+            # ── Handle stop (early finalize) ──────────────────
+            if stop_clicked and running_expl is not None:
+                running_expl.stop()
                 st.rerun(scope="fragment")
 
         with st.container(key="outcomes_slot"):

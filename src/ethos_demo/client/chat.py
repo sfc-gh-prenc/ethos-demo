@@ -5,7 +5,7 @@ import logging
 import re
 from collections.abc import Callable, Generator
 
-from openai import OpenAI
+from openai import AsyncOpenAI, OpenAI
 
 from ..config import API_KEY, DEFAULT_BASE_URL
 
@@ -30,12 +30,19 @@ class ChatClient:
         self.base_url = base_url
         self.enable_thinking = enable_thinking
         self._sync: OpenAI | None = None
+        self._async: AsyncOpenAI | None = None
 
     @property
     def _client(self) -> OpenAI:
         if self._sync is None:
             self._sync = OpenAI(base_url=self.base_url, api_key=API_KEY)
         return self._sync
+
+    @property
+    def _aclient(self) -> AsyncOpenAI:
+        if self._async is None:
+            self._async = AsyncOpenAI(base_url=self.base_url, api_key=API_KEY)
+        return self._async
 
     @property
     def _extra_body(self) -> dict:
@@ -45,6 +52,17 @@ class ChatClient:
         """Non-streaming chat completion — return the full response text."""
         extra_body = {**self._extra_body, **kwargs.pop("extra_body", {})}
         response = self._client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            extra_body=extra_body,
+            **kwargs,
+        )
+        return response.choices[0].message.content
+
+    async def async_send(self, messages: list[dict], **kwargs) -> str:
+        """Async non-streaming chat completion — return the full response text."""
+        extra_body = {**self._extra_body, **kwargs.pop("extra_body", {})}
+        response = await self._aclient.chat.completions.create(
             model=self.model,
             messages=messages,
             extra_body=extra_body,

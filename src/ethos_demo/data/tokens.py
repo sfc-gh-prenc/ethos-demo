@@ -21,6 +21,8 @@ async def format_tokens_as_dicts_async(tokens: list[str]) -> list[dict]:
         return []
 
     groups = group_tokens_by_info(tokens)
+    # Trajectories trimmed mid-group can leave groups longer than tokens
+    groups = groups[: len(tokens)]
 
     df = await (
         pl.LazyFrame([groups, pl.Series("token", tokens)])

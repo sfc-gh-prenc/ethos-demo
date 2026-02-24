@@ -68,9 +68,20 @@ class SummaryGenerator:
                             "type": "array",
                             "items": {"type": "string"},
                             "description": (
-                                "Measurement names as they appear in the "
-                                "timeline, e.g. ['HEMOGLOBIN//G/DL//BLOOD', "
-                                "'HEART_RATE', 'BLOOD_PRESSURE', 'BMI']"
+                                "IMPORTANT: Use the EXACT full measurement "
+                                "name including all '//' separators as it "
+                                "appears in the LAB or VITAL timeline data. "
+                                "Lab names follow the pattern "
+                                "NAME//UNIT//SPECIMEN, e.g. "
+                                "'HEMOGLOBIN//G/DL//BLOOD', "
+                                "'HEMATOCRIT//%//BLOOD', "
+                                "'SODIUM//MMOL/L//BLOOD', "
+                                "'POTASSIUM//MEQ/L//BLOOD', "
+                                "'UREA_NITROGEN//MG/DL//BLOOD', "
+                                "'CHOLESTEROL_TOTAL//MG/DL//BLOOD'. "
+                                "Vitals: 'HEART_RATE', 'BLOOD_PRESSURE'. "
+                                "Short names like 'HEMOGLOBIN' or "
+                                "'SODIUM' will NOT work."
                             ),
                         },
                     },
@@ -154,9 +165,9 @@ class SummaryGenerator:
 
     @classmethod
     def _extract_summary(cls, text: str) -> str:
-        """Extract content between <SUMMARY> tags, falling back to raw text."""
+        """Extract content between <SUMMARY> tags, or empty string if absent."""
         m = cls._SUMMARY_RE.search(text)
-        return m.group(1).strip() if m else text.strip()
+        return m.group(1).strip() if m else ""
 
     def _call_or_cancel(self, fn: Callable[..., _T], *args, **kwargs) -> _T | None:
         """Run *fn* off-thread, polling for cancellation every 0.2 s.
@@ -277,7 +288,7 @@ class SummaryGenerator:
             if result is None:
                 return
             _msgs, raw = result
-            past_summary = self._extract_summary(raw)
+            past_summary = self._extract_summary(raw) or _NO_PAST_HISTORY
             _logger.debug("Past history summary: %s", past_summary)
         else:
             past_summary = _NO_PAST_HISTORY

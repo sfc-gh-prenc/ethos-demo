@@ -203,6 +203,7 @@ class OutcomeEstimator:
         self._prompt, self._n_input_tokens = get_sample_prompt(dataset, sample_idx)
 
         self._results: dict[str, _AggResult] = {name: _AggResult() for name in self._outcome_names}
+        self._trajectories: list[tuple[list[str], dict[str, bool]]] = []
         self._completed = 0
         self._cancel_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -229,6 +230,11 @@ class OutcomeEstimator:
             else:
                 out[name] = None
         return out
+
+    @property
+    def trajectories(self) -> list[tuple[list[str], dict[str, bool]]]:
+        """All stored trajectories as ``(token_list, outcomes_dict)`` pairs."""
+        return self._trajectories
 
     @property
     def log_summary(self) -> dict:
@@ -278,7 +284,9 @@ class OutcomeEstimator:
     def _is_cancelled(self) -> bool:
         return self._cancel_event.is_set()
 
-    async def _request_batch(self, n: int, sem: asyncio.Semaphore) -> list[StreamTracker]:
+    async def _request_batch(
+        self, n: int, sem: asyncio.Semaphore
+    ) -> list[tuple[str, StreamTracker]]:
         async with sem:
             if self._is_cancelled():
                 return []
@@ -292,7 +300,7 @@ class OutcomeEstimator:
                 allowed_token_ids=self._allowed_token_ids,
             )
 
-        trackers: list[StreamTracker] = []
+        results: list[tuple[str, StreamTracker]] = []
         for text, _finish in pairs:
             t = StreamTracker(
                 rules=self._rules,
@@ -301,8 +309,8 @@ class OutcomeEstimator:
             )
             t.process_chunk(text)
             t.flush()
-            trackers.append(t)
-        return trackers
+            results.append((text, t))
+        return results
 
     async def _run(self) -> None:
         sem = asyncio.Semaphore(self.max_concurrent)
@@ -331,14 +339,15 @@ class OutcomeEstimator:
             )
             for future in done:
                 try:
-                    trackers = future.result()
+                    batch = future.result()
                 except Exception:
                     logger.debug("Request failed", exc_info=True)
                     self._completed += self.n_per_request
                     continue
 
-                self._completed += len(trackers) if trackers else self.n_per_request
-                for tracker in trackers:
+                self._completed += len(batch) if batch else self.n_per_request
+                for text, tracker in batch:
+                    self._trajectories.append((text.split(), tracker.outcomes))
                     for name, positive in tracker.outcomes.items():
                         agg = self._results[name]
                         agg.valid += 1
