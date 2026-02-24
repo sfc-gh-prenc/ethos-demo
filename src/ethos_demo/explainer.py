@@ -21,7 +21,7 @@ from .config import (
     N_EXPLANATION_TRAJECTORIES,
     PROMPTS_DIR,
 )
-from .data import format_tokens_as_dicts_async
+from .data import build_decile_label_maps, format_tokens_as_dicts_async
 from .scenarios import OutcomeRule, Scenario
 
 _logger = logging.getLogger(__name__)
@@ -106,6 +106,7 @@ class TrajectoryExplainer:
         present_summary: str,
         demographics_context: dict[str, str],
         scenario: Scenario,
+        dataset_name: str,
         model: str,
         base_url: str = DEFAULT_BASE_URL,
     ) -> None:
@@ -120,6 +121,7 @@ class TrajectoryExplainer:
             present_summary: Present encounter summary text (or placeholder).
             demographics_context: Demographic fields for prompt formatting.
             scenario: Active clinical scenario.
+            dataset_name: Dataset directory name, used for quantile look-ups.
             model: Chat LLM model ID.
             base_url: OpenAI-compatible API endpoint.
         """
@@ -131,6 +133,7 @@ class TrajectoryExplainer:
         self._present_summary = present_summary
         self._demographics = demographics_context
         self._scenario = scenario
+        self._dataset_name = dataset_name
         self._chat = ChatClient(model=model, base_url=base_url)
 
         self._cancel_event = threading.Event()
@@ -234,6 +237,8 @@ class TrajectoryExplainer:
         if self._cancelled():
             return
 
+        decile_maps = build_decile_label_maps(self._dataset_name)
+
         # ── 1. Sample and split (first run only) ─────────────────
         if self._sampled is None:
             self._status = "Sampling trajectories\u2026"
@@ -276,7 +281,7 @@ class TrajectoryExplainer:
             async def _summarize_one(idx: int, tokens: list[str], is_positive: bool) -> None:
                 if self._should_abort():
                     return
-                dicts = await format_tokens_as_dicts_async(tokens)
+                dicts = await format_tokens_as_dicts_async(tokens, decile_maps)
                 label = "POSITIVE" if is_positive else "NEGATIVE"
                 guidance = _outcome_guidance(is_positive, self._rule.title)
                 kwargs = {

@@ -1,17 +1,10 @@
-"""Quantile / decile loading, formatting, and range lookup (LLM tool backend)."""
+"""Quantile / decile loading, formatting, and label-map building."""
 
 import json
-import logging
 
 import streamlit as st
 
 from ..config import TOKENIZED_DATASETS_DIR
-
-_logger = logging.getLogger(__name__)
-
-_QUANTILE_KEY_PREFIXES = ("LAB//Q//", "VITAL//Q//", "")
-
-_BP_ALIASES = {"BLOOD_PRESSURE", "BP"}
 
 
 @st.cache_data
@@ -46,48 +39,37 @@ def _format_decile_label(inner: list[float], q_num: int, total_deciles: int) -> 
     return f"{inner[q_num - 2]:g} - {inner[q_num - 1]:g}"
 
 
-def _lookup_single(all_q: dict[str, list[float]], name: str) -> dict[str, str] | str:
-    raw = None
-    if name.upper() == "BMI":
-        raw = all_q.get("BMI//Q")
-    else:
-        for prefix in _QUANTILE_KEY_PREFIXES:
-            raw = all_q.get(f"{prefix}{name}")
-            if raw is not None:
-                break
+@st.cache_data
+def build_decile_label_maps(dataset_name: str) -> dict[str, dict[str, str]]:
+    """Pre-compute ``{key: annotated_decile}`` mappings for ``pl.replace()``.
 
-    if raw is None:
-        _logger.warning("Decile range not found for %r", name)
-        return "not available"
-
-    inner = _inner_breaks(raw)
-    n_deciles = len(inner) + 1 if len(raw) > 1 else 1
-    return {f"D{d}": _format_decile_label(inner, d, n_deciles) for d in range(1, n_deciles + 1)}
-
-
-def get_decile_ranges(dataset_name: str, names: list[str] | str) -> dict[str, dict[str, str] | str]:
-    """Return decile-range mappings for the requested measurement names.
-
-    Accepts lab names (e.g. ``HEMOGLOBIN//G/DL//BLOOD``), vital names
-    (e.g. ``HEART_RATE``, ``SBP``, ``DBP``), ``BMI``, or
-    ``BLOOD_PRESSURE`` / ``BP`` (expands to SBP + DBP).
-
-    *names* may be a list or a JSON-encoded string (LLMs sometimes
-    double-serialize the argument).
+    Returns a dict with four sub-dicts:
+    - ``"vital"``: composite keys ``"{name}||{d}" -> "{d} [{range}]"``
+    - ``"lab"``:   composite keys ``"{name}||{d}" -> "{d} [{range}]"``
+    - ``"sbp"``:   simple keys ``"{d}" -> "{d} [{range}]"``
+    - ``"dbp"``:   simple keys ``"{d}" -> "{d} [{range}]"``
     """
-    if isinstance(names, str):
-        try:
-            names = json.loads(names.replace("'", '"'))
-        except (json.JSONDecodeError, ValueError):
-            names = [names]
     all_q = load_quantiles(dataset_name)
-    result: dict[str, dict[str, str] | str] = {}
+    vital: dict[str, str] = {}
+    lab: dict[str, str] = {}
+    sbp: dict[str, str] = {}
+    dbp: dict[str, str] = {}
 
-    for name in names:
-        if name.upper() in _BP_ALIASES:
-            result["SBP"] = _lookup_single(all_q, "SBP")
-            result["DBP"] = _lookup_single(all_q, "DBP")
-        else:
-            result[name] = _lookup_single(all_q, name)
+    for key, raw in all_q.items():
+        inner = _inner_breaks(raw)
+        n = len(inner) + 1 if len(raw) > 1 else 1
+        labels = {str(d): f"{d} [{_format_decile_label(inner, d, n)}]" for d in range(1, n + 1)}
 
-    return result
+        if key.startswith("VITAL//Q//"):
+            name = key.removeprefix("VITAL//Q//")
+            if name == "SBP":
+                sbp = labels
+            elif name == "DBP":
+                dbp = labels
+            else:
+                vital.update({f"{name}||{d}": v for d, v in labels.items()})
+        elif key.startswith("LAB//Q//"):
+            name = key.removeprefix("LAB//Q//")
+            lab.update({f"{name}||{d}": v for d, v in labels.items()})
+
+    return {"vital": vital, "lab": lab, "sbp": sbp, "dbp": dbp}

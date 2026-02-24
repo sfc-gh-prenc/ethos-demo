@@ -7,21 +7,20 @@ Stage 2: Stream a present-event summary that incorporates the past-history
 """
 
 import asyncio
-import json
 import logging
 import re
 import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
-from typing import TYPE_CHECKING, ClassVar, TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
 import yaml
 from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
 
 from .client import ChatClient
 from .config import DEFAULT_BASE_URL, PROMPTS_DIR
-from .data import format_tokens_as_dicts_async, get_decile_ranges, get_patient_demographics
+from .data import build_decile_label_maps, format_tokens_as_dicts_async, get_patient_demographics
 from .scenarios import SCENARIOS, Scenario, get_timeline_times_us
 
 _logger = logging.getLogger(__name__)
@@ -41,55 +40,6 @@ class SummaryGenerator:
     Designed to be stored in session state. The UI reads ``running``,
     ``status``, and ``text`` at render time instead of relying on callbacks.
     """
-
-    _TOOL_SCHEMA: ClassVar[list[dict]] = [
-        {
-            "type": "function",
-            "function": {
-                "name": "get_decile_ranges",
-                "description": (
-                    "Look up the actual numeric value ranges for each decile "
-                    "of specified measurements (labs, vitals, or BMI). Use "
-                    "this ONLY for measurements whose decile is clinically "
-                    "significant and where knowing the real range would help "
-                    "you describe the result more accurately (e.g., critically "
-                    "low vs mildly low). Do NOT query every measurement — "
-                    "only those where the distinction matters. Returns a "
-                    "mapping of decile labels (D1, D2, ...) to value ranges. "
-                    "Note: not all measurements have 10 deciles; when "
-                    "population values lack differentiation, fewer deciles "
-                    "are returned. For blood pressure, pass "
-                    "'BLOOD_PRESSURE' to get both SBP and DBP ranges."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "names": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": (
-                                "IMPORTANT: Use the EXACT full measurement "
-                                "name including all '//' separators as it "
-                                "appears in the LAB or VITAL timeline data. "
-                                "Lab names follow the pattern "
-                                "NAME//UNIT//SPECIMEN, e.g. "
-                                "'HEMOGLOBIN//G/DL//BLOOD', "
-                                "'HEMATOCRIT//%//BLOOD', "
-                                "'SODIUM//MMOL/L//BLOOD', "
-                                "'POTASSIUM//MEQ/L//BLOOD', "
-                                "'UREA_NITROGEN//MG/DL//BLOOD', "
-                                "'CHOLESTEROL_TOTAL//MG/DL//BLOOD'. "
-                                "Vitals: 'HEART_RATE', 'BLOOD_PRESSURE'. "
-                                "Short names like 'HEMOGLOBIN' or "
-                                "'SODIUM' will NOT work."
-                            ),
-                        },
-                    },
-                    "required": ["names"],
-                },
-            },
-        }
-    ]
 
     def __init__(
         self,
@@ -226,24 +176,18 @@ class SummaryGenerator:
             {"role": "user", "content": tpl["user"].format(**kwargs)},
         ]
 
-    def _handle_tool_call(self, name: str, args: dict) -> str:
-        """Dispatch a tool call and return the JSON result string."""
-        if name == "get_decile_ranges":
-            result = get_decile_ranges(self.dataset_name, args["names"])
-            return json.dumps(result)
-        return json.dumps({"error": f"unknown tool: {name}"})
-
     def _run(self) -> None:
         # ── 1. Split & format timeline ──────────────────────────
         self._status = "Pulling records…"
 
         sc = SCENARIOS[self.scenario]
         split = sc.history_fn(self.dataset, self.selected_idx)
+        decile_maps = build_decile_label_maps(self.dataset_name)
 
         async def _format_both():
             return await asyncio.gather(
-                format_tokens_as_dicts_async(split.past_tokens),
-                format_tokens_as_dicts_async(split.present_tokens),
+                format_tokens_as_dicts_async(split.past_tokens, decile_maps),
+                format_tokens_as_dicts_async(split.present_tokens, decile_maps),
             )
 
         past_dicts, present_dicts = asyncio.run(_format_both())
@@ -268,57 +212,35 @@ class SummaryGenerator:
             len(past_dicts),
             len(present_dicts),
         )
-        _logger.debug("Current encounter tokens (%s): %s", self.scenario, split.present_tokens)
+        _logger.debug("Present encounter dicts (%s): %s", self.scenario, present_dicts[-100:])
+        _logger.debug(
+            "Current encounter tokens (%s): %s", self.scenario, split.present_tokens[-100:]
+        )
 
-        # ── 2. Stage 1: Summarize past history (with tool calling) ──
+        # ── 2. Stage 1: Summarize past history ─────────────────
         if past_dicts:
             self._status = "Reviewing past history…"
             if self._cancelled():
                 return
 
             past_messages = self._build_past_history_messages(past_dicts, past_fmt)
-            result = self._call_or_cancel(
-                self._chat.with_tools,
-                past_messages,
-                self._TOOL_SCHEMA,
-                self._handle_tool_call,
-                max_rounds=1,
-                finalize=True,
-            )
-            if result is None:
+            raw = self._call_or_cancel(self._chat.send, past_messages)
+            if raw is None:
                 return
-            _msgs, raw = result
             past_summary = self._extract_summary(raw) or _NO_PAST_HISTORY
             _logger.debug("Past history summary: %s", past_summary)
         else:
             past_summary = _NO_PAST_HISTORY
 
-        # ── 3. Stage 2: Present summary (tool loop then stream) ──
+        # ── 3. Stage 2: Present summary (streamed) ─────────────
         self._status = "Focusing on current encounter…"
         if self._cancelled():
             return
 
         present_messages = self._build_present_messages(present_dicts, past_summary, present_fmt)
 
-        result = self._call_or_cancel(
-            self._chat.with_tools,
-            present_messages,
-            self._TOOL_SCHEMA,
-            self._handle_tool_call,
-            max_rounds=1,
-        )
-        if result is None:
-            return
-        resolved_messages, preflight_text = result
-
-        if preflight_text:
-            self._text = self._extract_summary(preflight_text) or None
-            self._status = None
-            return
-
-        # Stream the final response with tool_choice="none"
         full_text = ""
-        stream = self._chat.stream(resolved_messages, tool_choice="none")
+        stream = self._chat.stream(present_messages)
         try:
             for delta in stream:
                 if self._cancelled():

@@ -73,15 +73,12 @@ system: |
     Instead describe the therapeutic purpose or medication class
     (e.g., "anticoagulation therapy", "broad-spectrum antibiotics",
     "antihypertensive treatment", "opioid analgesia").
-  - Do NOT mention decile labels explicitly (e.g., "D1", "D10").
-  - If a measurement's clinical significance is unclear from the decile
-    alone, you may use the get_decile_ranges tool to look up its real
-    range — but query ONLY the measurements where the distinction truly
-    matters for the summary. Do NOT query every measurement.
-  - NEVER report specific numeric values or ranges in the summary, even if
-    the tool provides them. Use qualitative descriptors instead (e.g.,
-    "critically low", "markedly elevated", "within normal limits",
-    "moderately reduced").
+  - DECILE values already include the numeric range in brackets
+    (e.g. "6 [14 - 25]"). Use these ranges for your internal reasoning
+    but do NOT mention decile labels explicitly (e.g., "D1", "D10").
+  - NEVER report specific numeric values or ranges in the summary. Use
+    qualitative descriptors instead (e.g., "critically low", "markedly
+    elevated", "within normal limits", "moderately reduced").
   - When characterizing the patient profile from past history, ground
     every claim in documented diagnoses, procedures, or lab patterns —
     do NOT generalize beyond what the history shows.

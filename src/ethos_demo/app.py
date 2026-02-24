@@ -278,6 +278,7 @@ def _handle_explain_click(rule, estimator, sc, backend) -> None:
         present_summary=present_summary,
         demographics_context=demo_ctx,
         scenario=estimator.scenario,
+        dataset_name=st.session_state["sel_ds"],
         model=backend.llm_model,
     )
     st.session_state[expl_key] = explainer
