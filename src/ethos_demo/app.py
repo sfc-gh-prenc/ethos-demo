@@ -652,6 +652,12 @@ if dataset_name and scenario:
 
             # ── Start estimation ──────────────────────────────
             if not estimating and run_clicked:
+                for _ek in [k for k in st.session_state if k.startswith("_explainer_")]:
+                    old_expl = st.session_state.pop(_ek, None)
+                    if old_expl is not None:
+                        old_expl.cancel()
+                st.session_state.pop("_active_explanation", None)
+
                 new_est = OutcomeEstimator(
                     dataset=ds,
                     sample_idx=selected_idx,

@@ -207,6 +207,7 @@ class TrajectoryExplainer:
     def stop(self) -> None:
         """Stop trajectory summarization early and proceed to final explanation."""
         self._stop_event.set()
+        self._progress = None
 
     def _cancelled(self) -> bool:
         return self._cancel_event.is_set()
@@ -236,11 +237,19 @@ class TrajectoryExplainer:
         if self._cancelled():
             return
 
+        n_total = (
+            len(self._sampled)
+            if self._sampled
+            else min(N_EXPLANATION_TRAJECTORIES, len(self._trajectories))
+        )
+        n_done = len(self._summary_results)
+        self._progress = (n_done, n_total)
+        self._status = f"Analyzing trajectories\u2026 {n_done}/{n_total}"
+
         decile_maps = build_decile_label_maps(self._dataset_name)
 
         # ── 1. Sample and split (first run only) ─────────────────
         if self._sampled is None:
-            self._status = "Sampling trajectories\u2026"
             n_sample = min(N_EXPLANATION_TRAJECTORIES, len(self._trajectories))
             rng = np.random.default_rng()
             indices = rng.choice(len(self._trajectories), size=n_sample, replace=False)
@@ -267,10 +276,6 @@ class TrajectoryExplainer:
         ]
 
         if remaining:
-            n_done = len(self._summary_results)
-            self._progress = (n_done, n_total)
-            self._status = f"Analyzing trajectories\u2026 {n_done}/{n_total}"
-
             with open(PROMPTS_DIR / "trajectory_summary.yaml") as f:
                 tpl = yaml.safe_load(f)
 
@@ -349,7 +354,6 @@ class TrajectoryExplainer:
 
         if n_summarized == 0:
             self._status = None
-            self._text = "No trajectory summaries could be generated."
             return
 
         # ── 3. Final explanation (streamed) ───────────────────────
