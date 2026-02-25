@@ -58,6 +58,8 @@ def _ai_working() -> bool:
 st.set_page_config(page_title="ETHOS Demo", layout="wide")
 
 _GLOBAL_CSS = (
+    "[data-testid='stMainBlockContainer']{max-width:60rem!important;"
+    "margin:0 auto!important}"
     "@keyframes _spin{to{transform:rotate(360deg)}}"
     "@keyframes _pulse{0%,100%{opacity:1}50%{opacity:.3}}"
     ".status-row{display:flex;align-items:center;gap:8px;height:28px}"
