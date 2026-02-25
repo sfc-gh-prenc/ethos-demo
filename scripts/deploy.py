@@ -26,28 +26,27 @@ def main():
     args = parser.parse_args()
 
     total_gpus = torch.cuda.device_count()
-    remaining_gpus = total_gpus - LLM_GPUS
+    llm_replicas = 3
+    remaining_gpus = total_gpus - LLM_GPUS * llm_replicas
 
     if remaining_gpus < 1:
         raise RuntimeError(
             f"Need at least {LLM_GPUS + 1} GPUs (found {total_gpus}): "
-            f"{LLM_GPUS} for deepseek + at least 1 for ethos"
+            f"{LLM_GPUS} for LLMs + at least 1 for ETHOS"
         )
 
     # One ethos replica per remaining GPU
     ethos_replicas = remaining_gpus
 
-    deepseek_config = LLMConfig(
+    llm_config = LLMConfig(
         model_loading_config={
-            "model_id": "llm/llama-3.1",
-            "model_source": "meta-llama/Llama-3.1-70B-Instruct",
+            "model_id": "llm/gpt-oss-120b",
+            "model_source": "openai/gpt-oss-120b",
         },
-        deployment_config={"num_replicas": 1},
+        deployment_config={"num_replicas": llm_replicas},
         engine_kwargs={
             "tensor_parallel_size": LLM_GPUS,
             "gpu_memory_utilization": args.gpu_memory_utilization,
-            "enable_auto_tool_choice": True,
-            "tool_call_parser": "llama3_json",
         },
     )
 
@@ -58,12 +57,11 @@ def main():
         },
         deployment_config={"num_replicas": ethos_replicas},
         engine_kwargs={
-            "tensor_parallel_size": 1,
             "gpu_memory_utilization": args.gpu_memory_utilization,
         },
     )
 
-    app = build_openai_app({"llm_configs": [deepseek_config, ethos_config]})
+    app = build_openai_app({"llm_configs": [llm_config, ethos_config]})
     serve.run(app, blocking=True)
 
 
