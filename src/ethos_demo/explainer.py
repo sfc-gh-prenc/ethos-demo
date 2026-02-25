@@ -190,6 +190,18 @@ class TrajectoryExplainer:
         self._thread = None
         self._launch()
 
+    def restart(self) -> None:
+        """Clear all cached state and re-run the full flow from scratch."""
+        self._stop_event.clear()
+        self._cancel_event.clear()
+        self._sampled = None
+        self._summary_results = {}
+        self._text = None
+        self._status = None
+        self._progress = None
+        self._thread = None
+        self._launch()
+
     def _launch(self) -> None:
         def _run_wrapper() -> None:
             try:

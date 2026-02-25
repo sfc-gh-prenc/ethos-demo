@@ -200,7 +200,8 @@ class OutcomeEstimator:
             "mean", {}
         )
 
-        self._prompt, self._n_input_tokens = get_sample_prompt(dataset, sample_idx)
+        self._prompt: str | None = None
+        self._n_input_tokens: int | None = None
 
         self._results: dict[str, _AggResult] = {name: _AggResult() for name in self._outcome_names}
         self._trajectories: list[tuple[list[str], dict[str, bool]]] = []
@@ -313,6 +314,9 @@ class OutcomeEstimator:
         return results
 
     async def _run(self) -> None:
+        self._prompt, self._n_input_tokens = get_sample_prompt(self.dataset, self.sample_idx)
+        if self._is_cancelled():
+            return
         sem = asyncio.Semaphore(self.max_concurrent)
 
         n_http = -(-self.n_completions // self.n_per_request)  # ceil division

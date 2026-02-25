@@ -142,10 +142,13 @@ class BackendMonitor:
 
         model_ids = {m.id for m in models}
         for key in ("ethos_model_id", "llm_model_id"):
+            current = st.session_state.get(key)
             saved = st.session_state.get(f"_saved_{key}")
-            if saved and saved not in model_ids:
-                _logger.info("Model %r no longer available — resetting %s", saved, key)
-                st.session_state.pop(f"_saved_{key}", None)
+            # Clear stale placeholder or unavailable model
+            if current == "Could not fetch models" or (saved and saved not in model_ids):
+                if saved and saved not in model_ids:
+                    _logger.info("Model %r no longer available — resetting %s", saved, key)
+                    st.session_state.pop(f"_saved_{key}", None)
                 st.session_state.pop(key, None)
 
     def _on_connection_lost(self) -> None:

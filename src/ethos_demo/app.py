@@ -10,6 +10,7 @@ from ethos_demo.config import (
     DEFAULT_BASE_URL,
     DEFAULT_ETHOS_TEMPERATURE,
     HEALTH_RETRY_SECONDS,
+    N_EXPLANATION_TRAJECTORIES,
     N_SAMPLES,
     SAMPLE_SEED,
     TOKENIZED_DATASETS_DIR,
@@ -74,23 +75,23 @@ _GLOBAL_CSS = (
     "{animation:_spin .7s linear infinite}"
     ".st-key-sel_ds label p,"
     ".st-key-sel_sc label p,"
-    ".st-key-sel_pt label p"
+    ".st-key-sel_pt label p,"
+    ".st-key-sel_outcome label p"
     "{font-size:0.95rem}"
     ".outcome-card{border:1px solid rgba(255,255,255,0.1);"
     "border-radius:12px;padding:1.2em 0.6em;"
-    "text-align:center;transition:background .2s}"
-    ".outcome-card.active{background:rgba(255,255,255,0.04)}"
+    "text-align:center}"
     "div[class*='st-key-card_']{position:relative}"
-    "div[class*='st-key-expl_btn_']{"
+    ".st-key-refresh_btn{"
     "position:absolute!important;top:10px;right:10px;"
     "z-index:10;width:auto!important}"
-    "div[class*='st-key-expl_btn_'] button{"
+    ".st-key-refresh_btn button{"
     "padding:4px 6px!important;min-height:0!important;"
     "background:transparent!important;border:none!important;"
     "box-shadow:none!important;opacity:0.5}"
-    "div[class*='st-key-expl_btn_'] button span[data-testid='stIconMaterial']{"
-    "font-size:1.6em}"
-    "div[class*='st-key-expl_btn_'] button:hover{opacity:1}"
+    ".st-key-refresh_btn button span[data-testid='stIconMaterial']{"
+    "font-size:1.4em}"
+    ".st-key-refresh_btn button:hover{opacity:1}"
     ".st-key-stop_expl_btn button{"
     "padding:2px 8px!important;min-height:0!important;opacity:0.5}"
     ".st-key-stop_expl_btn button:hover{opacity:1}"
@@ -220,28 +221,36 @@ def _start_summary(
     summarizer.start()
 
 
-def _handle_explain_click(rule, estimator, sc, backend) -> None:
-    """React to a ?
+def _trigger_explanation(rule: OutcomeRule, estimator, backend) -> None:
+    """Ensure an explanation is running or cached for *rule*.
 
-    / bulb click on an outcome card.
+    Called automatically when the outcome dropdown selection changes.
     """
     expl_key = f"_explainer_{rule.name}"
     existing: TrajectoryExplainer | None = st.session_state.get(expl_key)
 
-    # Resume a previously stopped explainer to finish remaining summaries
+    st.session_state["_active_explanation"] = rule.name
+
+    # Already has a final overview — just display it
+    if existing is not None and existing.text:
+        return
+
+    # Currently running — let it finish
+    if existing is not None and existing.running:
+        return
+
+    # Stopped early with unsummarized trajectories — resume
     if existing is not None and existing.can_resume:
-        st.session_state["_active_explanation"] = rule.name
         existing.resume()
         return
 
-    # Toggle display for an existing explainer (running or cached)
-    if existing is not None and (existing.running or existing.text):
-        if st.session_state.get("_active_explanation") == rule.name:
-            st.session_state.pop("_active_explanation", None)
-        else:
-            st.session_state["_active_explanation"] = rule.name
+    # Has cached summaries but no final text (and not running) — resume to
+    # generate the final overview
+    if existing is not None and existing.n_summarized > 0:
+        existing.resume()
         return
 
+    # Nothing cached — start from scratch
     if not backend.has_llm_model:
         return
 
@@ -284,7 +293,6 @@ def _handle_explain_click(rule, estimator, sc, backend) -> None:
         model=backend.llm_model,
     )
     st.session_state[expl_key] = explainer
-    st.session_state["_active_explanation"] = rule.name
     explainer.start()
 
 
@@ -349,6 +357,7 @@ if dataset_name and scenario:
                 if old_expl is not None:
                     old_expl.cancel()
             st.session_state.pop("_active_explanation", None)
+            st.session_state.pop("_prev_outcome", None)
             # Auto-fire summary if LLM model available
             if backend.has_llm_model:
                 _start_summary(
@@ -454,7 +463,7 @@ if dataset_name and scenario:
         # ── Outcome estimation ────────────────────────────────────
         st.divider()
 
-        @st.fragment(run_every=timedelta(milliseconds=500))
+        @st.fragment(run_every=timedelta(seconds=1))
         def _outcomes_fragment():
             estimator: OutcomeEstimator | None = st.session_state.get("_estimator")
             estimating = estimator is not None and estimator.running
@@ -471,8 +480,26 @@ if dataset_name and scenario:
             # ── Button row ────────────────────────────────────
             prog = estimator.progress if estimator else None
             stop_clicked = False
+            probs = estimator.probabilities if estimator else {}
+            has_trajectories = (
+                estimator is not None and not estimating and len(estimator.trajectories) > 0
+            )
 
-            btn_col, expl_status_col = st.columns([1, 3])
+            dropdown_col, btn_col, expl_status_col = st.columns([1.5, 1.3, 2.2])
+
+            with dropdown_col:
+                outcome_labels = [f"{r.icon}  {r.title}" for r in sc.outcomes]
+                sel_idx = st.selectbox(
+                    "Outcome",
+                    options=range(len(sc.outcomes)),
+                    format_func=lambda i: outcome_labels[i],
+                    key="sel_outcome",
+                    label_visibility="collapsed",
+                    disabled=running_expl is not None,
+                )
+
+            selected_rule = sc.outcomes[sel_idx]
+
             with btn_col, st.container(key="est_btn"):
                 if estimating:
                     pct = int(100 * prog[0] / prog[1]) if prog else 0
@@ -521,80 +548,46 @@ if dataset_name and scenario:
                         with xcol, st.container(key="stop_expl_btn"):
                             stop_clicked = st.button("\u2715", key="stop_expl_action")
 
-            # ── Outcome cards ─────────────────────────────────
-            probs = estimator.probabilities if estimator else {}
-            has_trajectories = (
-                estimator is not None and not estimating and len(estimator.trajectories) > 0
-            )
-            active_expl = st.session_state.get("_active_explanation")
-
-            card_cols = st.columns(len(sc.outcomes))
-            explain_clicked_rule: OutcomeRule | None = None
-
-            for col, rule in zip(card_cols, sc.outcomes, strict=False):
-                with col, st.container(key=f"card_{rule.name}"):
-                    expl_key = f"_explainer_{rule.name}"
-                    expl: TrajectoryExplainer | None = st.session_state.get(expl_key)
-                    is_running = expl is not None and expl.running
-                    in_final = (
-                        expl is not None
-                        and expl.progress is None
-                        and (expl.text is not None or expl.running)
-                        and expl.n_summarized > 0
+            # ── Selected outcome card (aligned with button) ──
+            refresh_clicked = False
+            _pad_l, card_col, _pad_r = st.columns([1.5, 2, 1.5])
+            with card_col, st.container(key=f"card_{selected_rule.name}"):
+                card_html = (
+                    "<div class='outcome-card'>"
+                    f"<span style='font-size:5em'>{selected_rule.icon}</span><br>"
+                    f"<b style='font-size:1.3em'>{selected_rule.title}</b>"
+                )
+                entry = probs.get(selected_rule.name)
+                if entry is not None:
+                    prob_val, k, n = entry
+                    margin_val = wilson_margin(k, n)
+                    card_html += (
+                        f"<div style='font-size:2em'>"
+                        f"{prob_val:.0%}"
+                        f"<span style='display:inline-block;width:0;"
+                        f"overflow:visible;vertical-align:baseline'>"
+                        f"<span style='font-size:0.42em;color:gray;"
+                        f"margin-left:4px;white-space:nowrap'>"
+                        f"\u00b1{margin_val * 100:.1f}%</span></span></div>"
                     )
-                    is_active = active_expl == rule.name and (
-                        in_final or (expl is not None and expl.text is not None)
-                    )
+                else:
+                    card_html += "<div style='font-size:2em;color:gray'>???</div>"
+                card_html += "</div>"
+                st.markdown(card_html, unsafe_allow_html=True)
 
-                    active_cls = " active" if is_active else ""
-                    card_html = (
-                        f"<div class='outcome-card{active_cls}'>"
-                        f"<span style='font-size:5em'>{rule.icon}</span><br>"
-                        f"<b style='font-size:1.3em'>{rule.title}</b>"
-                    )
-
-                    entry = probs.get(rule.name)
-                    if entry is not None:
-                        prob, k, n = entry
-                        margin = wilson_margin(k, n)
-                        card_html += (
-                            f"<div style='font-size:2em'>"
-                            f"{prob:.0%}"
-                            f"<span style='display:inline-block;width:0;"
-                            f"overflow:visible;vertical-align:baseline'>"
-                            f"<span style='font-size:0.42em;color:gray;"
-                            f"margin-left:4px;white-space:nowrap'>"
-                            f"\u00b1{margin * 100:.1f}%</span></span></div>"
+                sel_expl: TrajectoryExplainer | None = st.session_state.get(
+                    f"_explainer_{selected_rule.name}"
+                )
+                sel_running = sel_expl is not None and sel_expl.running
+                if has_trajectories and not sel_running:
+                    with st.container(key="refresh_btn"):
+                        refresh_clicked = st.button(
+                            "",
+                            icon=":material/refresh:",
+                            key="refresh_expl_action",
                         )
-                    else:
-                        card_html += "<div style='font-size:2em;color:gray'>???</div>"
 
-                    card_html += "</div>"
-                    st.markdown(card_html, unsafe_allow_html=True)
-
-                    # Icon button overlaid at top-right corner via CSS
-                    if has_trajectories or (expl is not None and expl.text):
-                        btn_ico = (
-                            ":material/lightbulb:"
-                            if (expl and expl.text and not is_running)
-                            else ":material/help_outline:"
-                        )
-                        with st.container(key=f"expl_btn_{rule.name}"):
-                            if st.button(
-                                "",
-                                icon=btn_ico,
-                                key=f"expl_click_{rule.name}",
-                            ):
-                                explain_clicked_rule = rule
-                        if is_running:
-                            st.markdown(
-                                f"<style>.st-key-expl_btn_{rule.name} button"
-                                f"{{animation:_pulse 1.2s ease-in-out infinite"
-                                f"!important;opacity:1!important}}</style>",
-                                unsafe_allow_html=True,
-                            )
-
-            # ── Explanation display area ──────────────────────
+            # ── Score Overview display ─────────────────────────
             _expl_box = (
                 "<div style='min-height:100px;background:rgba(255,255,255,0.04);"
                 "border-radius:10px;padding:1em;margin-top:1em'>"
@@ -607,11 +600,12 @@ if dataset_name and scenario:
                 "</div>"
             )
 
+            active_expl = st.session_state.get("_active_explanation")
             if active_expl:
-                expl_key = f"_explainer_{active_expl}"
-                active_expl_obj: TrajectoryExplainer | None = st.session_state.get(expl_key)
+                active_expl_obj: TrajectoryExplainer | None = st.session_state.get(
+                    f"_explainer_{active_expl}"
+                )
                 if active_expl_obj is not None:
-                    # Show only once past the summarization phase
                     in_final_phase = active_expl_obj.text is not None or (
                         active_expl_obj.progress is None
                         and active_expl_obj.running
@@ -657,6 +651,7 @@ if dataset_name and scenario:
                     if old_expl is not None:
                         old_expl.cancel()
                 st.session_state.pop("_active_explanation", None)
+                st.session_state.pop("_prev_outcome", None)
 
                 new_est = OutcomeEstimator(
                     dataset=ds,
@@ -670,20 +665,35 @@ if dataset_name and scenario:
                     allowed_token_ids=get_allowed_token_ids(dataset_name, ds_task),
                 )
                 st.session_state["_estimator"] = new_est
+                new_est.start()
                 st.rerun(scope="fragment")
-
-            # ── Launch estimation (deferred from button click) ──
-            if estimator is not None and not estimator.running and estimator.progress is None:
-                estimator.start()
 
             # ── Cancel estimation ─────────────────────────────
             if estimating and cancel_clicked:
                 estimator.cancel()
                 st.rerun(scope="fragment")
 
-            # ── Handle explain button clicks ──────────────────
-            if explain_clicked_rule is not None:
-                _handle_explain_click(explain_clicked_rule, estimator, sc, backend)
+            # ── Auto-trigger explanation on dropdown switch ───
+            if has_trajectories and not estimating:
+                _prev_outcome = st.session_state.get("_prev_outcome")
+                if _prev_outcome != selected_rule.name:
+                    st.session_state["_prev_outcome"] = selected_rule.name
+                    _trigger_explanation(selected_rule, estimator, backend)
+                    st.rerun(scope="fragment")
+
+            # ── Handle refresh button ─────────────────────────
+            if refresh_clicked:
+                sel_expl_obj: TrajectoryExplainer | None = st.session_state.get(
+                    f"_explainer_{selected_rule.name}"
+                )
+                if sel_expl_obj is not None:
+                    if sel_expl_obj.n_summarized >= N_EXPLANATION_TRAJECTORIES:
+                        sel_expl_obj.restart()
+                    else:
+                        sel_expl_obj.resume()
+                    st.session_state["_active_explanation"] = selected_rule.name
+                else:
+                    _trigger_explanation(selected_rule, estimator, backend)
                 st.rerun(scope="fragment")
 
             # ── Handle stop (early finalize) ──────────────────
