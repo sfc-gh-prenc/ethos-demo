@@ -515,7 +515,7 @@ if dataset_name and scenario:
                     run_clicked = st.button(
                         "Estimate Outcomes",
                         key="est_action_btn",
-                        disabled=not has_model,
+                        disabled=not has_model or running_expl is not None,
                         use_container_width=True,
                     )
                 _fill = (

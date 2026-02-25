@@ -421,3 +421,5 @@ class TrajectoryExplainer:
             self._text = full_text.split(tag_open, 1)[1].strip() or None
         else:
             self._text = full_text.strip() or None
+
+        _logger.debug("Score overview for %s: %s", self._rule.name, self._text)

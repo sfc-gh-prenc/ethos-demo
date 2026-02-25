@@ -17,9 +17,10 @@ system: |
 
   <OUTPUT_FORMAT>
   Wrap your explanation inside <EXPLANATION>...</EXPLANATION> tags.
-  Output 1-3 coherent paragraphs. Separate each paragraph with an
-  empty line for readability.
-  No bullet points, no headings, no commentary outside the tags.
+  Output 2-4 short paragraphs (each no more than 3 sentences).
+  Separate EVERY paragraph with an additional blank line so the text
+  is easy to scan. No bullet points, no headings, no commentary
+  outside the tags.
   </OUTPUT_FORMAT>
 
   <CONSTRAINTS>
