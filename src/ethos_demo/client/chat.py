@@ -17,11 +17,9 @@ class ChatClient:
         self,
         model: str,
         base_url: str = DEFAULT_BASE_URL,
-        enable_thinking: bool = False,
     ) -> None:
         self.model = model
         self.base_url = base_url
-        self.enable_thinking = enable_thinking
         self._sync: OpenAI | None = None
         self._async: AsyncOpenAI | None = None
 
@@ -37,40 +35,30 @@ class ChatClient:
             self._async = AsyncOpenAI(base_url=self.base_url, api_key=API_KEY)
         return self._async
 
-    @property
-    def _extra_body(self) -> dict:
-        return {"chat_template_kwargs": {"enable_thinking": self.enable_thinking}}
-
     def send(self, messages: list[dict], **kwargs) -> str:
-        """Non-streaming chat completion — return the full response text."""
-        extra_body = {**self._extra_body, **kwargs.pop("extra_body", {})}
+        """Non-streaming chat completion - return the full response text."""
         response = self._client.chat.completions.create(
             model=self.model,
             messages=messages,
-            extra_body=extra_body,
             **kwargs,
         )
         return response.choices[0].message.content
 
     async def async_send(self, messages: list[dict], **kwargs) -> str:
-        """Async non-streaming chat completion — return the full response text."""
-        extra_body = {**self._extra_body, **kwargs.pop("extra_body", {})}
+        """Async non-streaming chat completion - return the full response text."""
         response = await self._aclient.chat.completions.create(
             model=self.model,
             messages=messages,
-            extra_body=extra_body,
             **kwargs,
         )
         return response.choices[0].message.content
 
     def stream(self, messages: list[dict], **kwargs) -> Generator[str, None, None]:
         """Stream a chat completion, yielding text deltas."""
-        extra_body = {**self._extra_body, **kwargs.pop("extra_body", {})}
         stream = self._client.chat.completions.create(
             model=self.model,
             messages=messages,
             stream=True,
-            extra_body=extra_body,
             **kwargs,
         )
         for chunk in stream:

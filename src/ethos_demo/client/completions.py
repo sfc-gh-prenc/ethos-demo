@@ -41,6 +41,8 @@ class CompletionClient:
         n_input_tokens: int,
         n: int = 1,
         stop: list[str] | None = None,
+        temperature: float = 0.2,
+        top_p: float = 0.9,
         **kwargs,
     ) -> list[tuple[str, str]]:
         """Send a completion request and return (text, finish_reason) per choice."""
@@ -51,6 +53,8 @@ class CompletionClient:
             n=n,
             stop=stop,
             max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
             extra_body={"include_stop_str_in_output": True},
             **kwargs,
         )
@@ -64,9 +68,11 @@ class CompletionClient:
         n: int = 1,
         stop: list[str] | None = None,
         allowed_token_ids: list[int] | None = None,
+        temperature: float = 0.2,
+        top_p: float = 0.9,
         **kwargs,
     ) -> list[tuple[str, str]]:
-        """Async completion request — return (text, finish_reason) per choice."""
+        """Async completion request - return (text, finish_reason) per choice."""
         max_tokens = self.max_model_len - n_input_tokens
         extra_body: dict = {"include_stop_str_in_output": True}
         if allowed_token_ids is not None:
@@ -77,6 +83,8 @@ class CompletionClient:
             n=n,
             stop=stop,
             max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
             extra_body=extra_body,
             **kwargs,
         )
@@ -88,6 +96,8 @@ class CompletionClient:
         *,
         n_input_tokens: int,
         stop: list[str] | None = None,
+        temperature: float = 0.2,
+        top_p: float = 0.9,
         **kwargs,
     ) -> AsyncIterator[str]:
         """Stream a text completion, yielding text deltas as they arrive."""
@@ -98,6 +108,8 @@ class CompletionClient:
             stream=True,
             max_tokens=max_tokens,
             stop=stop,
+            temperature=temperature,
+            top_p=top_p,
             extra_body={"include_stop_str_in_output": True},
             **kwargs,
         )
