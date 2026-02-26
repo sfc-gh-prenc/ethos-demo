@@ -1,8 +1,11 @@
 """Dataset loading, sampling, and sample-level helpers."""
 
+from __future__ import annotations
+
 import json
 from collections import Counter
 from datetime import timedelta
+from typing import TYPE_CHECKING
 
 import numpy as np
 import streamlit as st
@@ -10,6 +13,9 @@ from ethos.constants import SpecialToken
 from ethos.datasets import InferenceDataset
 
 from ..config import TOKENIZED_DATASETS_DIR
+
+if TYPE_CHECKING:
+    from ..scenarios import HistorySplit, Scenario
 
 
 @st.cache_resource
@@ -159,3 +165,54 @@ def format_timedelta(td: timedelta) -> str:
         days = total_days - round(months * 30.44)
         return f"{months}mt {days}d" if days > 0 else f"{months}mt"
     return f"{total_days}d"
+
+
+_DEMO_ORDER = ["Gender", "Race", "Age", "BMI", "Marital Status"]
+
+
+class SampleContext:
+    """Pre-computed sample pool for a dataset+task combination.
+
+    Caches per-patient demographics, BMI, and history splits so they are computed at most once per
+    sample selection.
+    """
+
+    def __init__(self, dataset_name: str, task: str, n_samples: int, seed: int):
+        self.dataset = load_dataset(dataset_name, task)
+        self.dataset_name = dataset_name
+        self.task = task
+        indices = sample_indices(self.dataset, n_samples, seed)
+        self.labels = build_sample_labels(self.dataset, indices)
+        self.label_to_idx: dict[str, int] = {label: idx for idx, label in self.labels}
+        self._demo_cache: dict[int, dict[str, str]] = {}
+        self._split_cache: dict[tuple[int, str], HistorySplit] = {}
+
+    def demographics(self, idx: int) -> dict[str, str]:
+        """Return ordered demographics dict for sample *idx* (cached)."""
+        if idx not in self._demo_cache:
+            from .demographics import get_patient_bmi_group, get_patient_demographics
+
+            raw = get_patient_demographics(self.dataset, idx)
+            raw["BMI"] = get_patient_bmi_group(self.dataset, idx, self.dataset_name)
+            self._demo_cache[idx] = {k: raw.get(k, "???") for k in _DEMO_ORDER}
+        return self._demo_cache[idx]
+
+    def history_split(self, idx: int, scenario: Scenario) -> HistorySplit:
+        """Return history/encounter split for sample *idx* under *scenario* (cached)."""
+        key = (idx, str(scenario))
+        if key not in self._split_cache:
+            from ..scenarios import SCENARIOS
+
+            self._split_cache[key] = SCENARIOS[scenario].history_fn(self.dataset, idx)
+        return self._split_cache[key]
+
+
+@st.cache_resource
+def get_sample_context(
+    dataset_name: str,
+    task: str,
+    n_samples: int,
+    seed: int,
+) -> SampleContext:
+    """Return a cached `SampleContext` for the given dataset+task combination."""
+    return SampleContext(dataset_name, task, n_samples, seed)

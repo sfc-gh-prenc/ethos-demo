@@ -16,18 +16,25 @@ from ethos_demo.config import (
     TOKENIZED_DATASETS_DIR,
 )
 from ethos_demo.data import (
-    build_sample_labels,
     format_timedelta,
     get_allowed_token_ids,
-    get_patient_bmi_group,
-    get_patient_demographics,
-    load_dataset,
-    sample_indices,
+    get_sample_context,
 )
 from ethos_demo.estimator import OutcomeEstimator
 from ethos_demo.explainer import TrajectoryExplainer
 from ethos_demo.scenarios import SCENARIOS, OutcomeRule, Scenario
 from ethos_demo.summarizer import SummaryGenerator
+from ethos_demo.ui import (
+    inject_styles,
+    render_demographics,
+    render_ehr_stats,
+    render_estimate_button_fill,
+    render_explainer_status,
+    render_outcome_card,
+    render_score_overview,
+    render_status_indicator,
+    render_summary,
+)
 from ethos_demo.utils import wilson_margin
 
 _logger = logging.getLogger("ethos_demo")
@@ -57,46 +64,7 @@ def _ai_working() -> bool:
 
 
 st.set_page_config(page_title="ETHOS Demo", layout="wide")
-
-_GLOBAL_CSS = (
-    "[data-testid='stMainBlockContainer']{max-width:60rem!important;"
-    "margin:0 auto!important}"
-    "@keyframes _spin{to{transform:rotate(360deg)}}"
-    "@keyframes _pulse{0%,100%{opacity:1}50%{opacity:.3}}"
-    ".status-row{display:flex;align-items:center;gap:8px;height:28px}"
-    ".status-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}"
-    ".status-dot.ok{background:#4caf50}"
-    ".status-dot.err{background:#f44336}"
-    ".status-text{font-size:0.85em}"
-    ".st-key-sidebar_bottom{position:fixed;bottom:1rem;width:inherit}"
-    ".st-key-sidebar_bottom button"
-    "{padding:0!important;min-height:0!important}"
-    ".st-key-ai_working_bar span[data-testid='stIconMaterial']"
-    "{animation:_spin .7s linear infinite}"
-    ".st-key-sel_ds label p,"
-    ".st-key-sel_sc label p,"
-    ".st-key-sel_pt label p,"
-    ".st-key-sel_outcome label p"
-    "{font-size:0.95rem}"
-    ".outcome-card{border:1px solid rgba(255,255,255,0.1);"
-    "border-radius:12px;padding:1.2em 0.6em;"
-    "text-align:center}"
-    "div[class*='st-key-card_']{position:relative}"
-    ".st-key-refresh_btn{"
-    "position:absolute!important;top:10px;right:10px;"
-    "z-index:10;width:auto!important}"
-    ".st-key-refresh_btn button{"
-    "padding:4px 6px!important;min-height:0!important;"
-    "background:transparent!important;border:none!important;"
-    "box-shadow:none!important;opacity:0.5}"
-    ".st-key-refresh_btn button span[data-testid='stIconMaterial']{"
-    "font-size:1.4em}"
-    ".st-key-refresh_btn button:hover{opacity:1}"
-    ".st-key-stop_expl_btn button{"
-    "padding:2px 8px!important;min-height:0!important;opacity:0.5}"
-    ".st-key-stop_expl_btn button:hover{opacity:1}"
-)
-st.markdown(f"<style>{_GLOBAL_CSS}</style>", unsafe_allow_html=True)
+inject_styles()
 
 st.title("ETHOS Demo")
 
@@ -104,15 +72,6 @@ st.title("ETHOS Demo")
 # ── Sidebar ───────────────────────────────────────────────────────────────
 with st.sidebar:
     backend = BackendMonitor(DEFAULT_BASE_URL)
-
-    def _status_html(dot_cls: str, label: str) -> str:
-        return (
-            f"<div class='status-row'>"
-            f"<span style='color:gray;font-size:0.8em'>ETHOS</span>"
-            f"<span class='status-dot {dot_cls}'></span>"
-            f"<span class='status-text'>{label}</span>"
-            f"</div>"
-        )
 
     # ── AI working indicator (polls every 1s) ─────────────────
     @st.fragment(run_every=timedelta(seconds=1))
@@ -134,9 +93,7 @@ with st.sidebar:
     @st.fragment(run_every=timedelta(seconds=HEALTH_RETRY_SECONDS))
     def _health_status_fragment():
         event = backend.poll()
-        dot_cls = "ok" if backend.healthy else "err"
-        label = "Connected" if backend.healthy else "Unreachable"
-        st.markdown(_status_html(dot_cls, label), unsafe_allow_html=True)
+        render_status_indicator(backend.healthy)
         if event != BackendEvent.UNCHANGED:
             st.rerun()
 
@@ -221,7 +178,7 @@ def _start_summary(
     summarizer.start()
 
 
-def _trigger_explanation(rule: OutcomeRule, estimator, backend) -> None:
+def _trigger_explanation(rule: OutcomeRule, estimator, backend, ctx) -> None:
     """Ensure an explanation is running or cached for *rule*.
 
     Called automatically when the outcome dropdown selection changes.
@@ -272,7 +229,7 @@ def _trigger_explanation(rule: OutcomeRule, estimator, backend) -> None:
         if summarizer and summarizer.text
         else "Present encounter summary is not available."
     )
-    demographics = get_patient_demographics(estimator.dataset, estimator.sample_idx)
+    demographics = ctx.demographics(estimator.sample_idx)
     demo_ctx = {
         "marital_status": demographics.get("Marital Status", "unknown"),
         "race": demographics.get("Race", "unknown"),
@@ -297,11 +254,16 @@ def _trigger_explanation(rule: OutcomeRule, estimator, backend) -> None:
 
 
 # ── Main area ───────────────────────────────────────────────────────────────
-dataset_names = (
-    sorted(p.name for p in TOKENIZED_DATASETS_DIR.iterdir() if p.is_dir())
-    if TOKENIZED_DATASETS_DIR.is_dir()
-    else []
-)
+
+
+@st.cache_data(ttl=60)
+def _list_dataset_names() -> list[str]:
+    if not TOKENIZED_DATASETS_DIR.is_dir():
+        return []
+    return sorted(p.name for p in TOKENIZED_DATASETS_DIR.iterdir() if p.is_dir())
+
+
+dataset_names = _list_dataset_names()
 
 col_ds, _col_ds_r = st.columns(2)
 with col_ds:
@@ -327,28 +289,21 @@ with col_sc:
 selected_label = None
 if dataset_name and scenario:
     sc = SCENARIOS[scenario]
-    tasks = sc.task_names
-    ds_task = sc.dataset
 
     with st.spinner("Loading dataset…"):
-        ds = load_dataset(dataset_name, ds_task)
+        ctx = get_sample_context(dataset_name, sc.dataset, N_SAMPLES, SAMPLE_SEED)
 
-    indices = sample_indices(ds, N_SAMPLES, SAMPLE_SEED)
-    labels = build_sample_labels(ds, indices)
-
-    label_to_idx = {label: idx for idx, label in labels}
     with col_pt:
-        selected_label = st.selectbox("Cases", options=list(label_to_idx), key="sel_pt")
+        selected_label = st.selectbox("Cases", options=list(ctx.label_to_idx), key="sel_pt")
 
     if selected_label is not None:
-        selected_idx = label_to_idx[selected_label]
+        selected_idx = ctx.label_to_idx[selected_label]
 
         # ── Auto-trigger on selection change ──────────────────────
         current_key = f"{scenario}:{selected_label}"
         selection_changed = st.session_state.get("_last_selection") != current_key
         if selection_changed:
             st.session_state["_last_selection"] = current_key
-            # Cancel any in-flight estimation and explainers
             est: OutcomeEstimator | None = st.session_state.pop("_estimator", None)
             if est is not None:
                 est.cancel()
@@ -358,10 +313,9 @@ if dataset_name and scenario:
                     old_expl.cancel()
             st.session_state.pop("_active_explanation", None)
             st.session_state.pop("_prev_outcome", None)
-            # Auto-fire summary if LLM model available
             if backend.has_llm_model:
                 _start_summary(
-                    ds=ds,
+                    ds=ctx.dataset,
                     selected_idx=selected_idx,
                     scenario=scenario,
                     dataset_name=dataset_name,
@@ -377,85 +331,29 @@ if dataset_name and scenario:
             and not _ai_working()
         ):
             _start_summary(
-                ds=ds,
+                ds=ctx.dataset,
                 selected_idx=selected_idx,
                 scenario=scenario,
                 dataset_name=dataset_name,
             )
 
         # ── Demographics ──────────────────────────────────────────
-        raw_demo = get_patient_demographics(ds, selected_idx)
-        raw_demo["BMI"] = get_patient_bmi_group(ds, selected_idx, dataset_name)
-        _DEMO_ORDER = ["Gender", "Race", "Age", "BMI", "Marital Status"]
-        demographics = {k: raw_demo.get(k, "???") for k in _DEMO_ORDER}
+        render_demographics(ctx.demographics(selected_idx))
 
-        st.subheader("Demographics")
-        demo_cols = st.columns(len(demographics))
-        for col, (key, value) in zip(demo_cols, demographics.items(), strict=False):
-            col.markdown(
-                f"<span style='color:gray'>{key}</span><br>"
-                f"<span style='font-size:1.3em'>{value}</span>",
-                unsafe_allow_html=True,
-            )
-
-        split = sc.history_fn(ds, selected_idx)
-
-        st.subheader("EHR")
-
-        _section_hdr = "<span style='font-size:1.1em;font-weight:600'>{title}</span>"
-        _stat_html = (
-            "<span style='color:gray'>{label}</span><br>"
-            "<span style='font-size:1.3em'>{value}</span>"
+        split = ctx.history_split(selected_idx, scenario)
+        render_ehr_stats(
+            present_time_span=format_timedelta(split.present_time_span),
+            present_count=len(split.present_tokens),
+            past_time_span=format_timedelta(split.past_time_span),
+            past_count=len(split.past_tokens),
         )
-        col_enc, col_hist = st.columns(2)
-        with col_enc:
-            st.markdown(_section_hdr.format(title="Current Encounter"), unsafe_allow_html=True)
-            e1, e2 = st.columns(2)
-            e1.markdown(
-                _stat_html.format(
-                    label="Time Span", value=format_timedelta(split.present_time_span)
-                ),
-                unsafe_allow_html=True,
-            )
-            e2.markdown(
-                _stat_html.format(label="Events", value=f"{len(split.present_tokens):,}"),
-                unsafe_allow_html=True,
-            )
-        with col_hist:
-            st.markdown(_section_hdr.format(title="History"), unsafe_allow_html=True)
-            h1, h2 = st.columns(2)
-            h1.markdown(
-                _stat_html.format(label="Time Span", value=format_timedelta(split.past_time_span)),
-                unsafe_allow_html=True,
-            )
-            h2.markdown(
-                _stat_html.format(label="Events", value=f"{len(split.past_tokens):,}"),
-                unsafe_allow_html=True,
-            )
 
         # ── EHR Summary (polls every 0.5s for streaming text) ─────
-        _summary_box = (
-            "<div style='min-height:120px'>"
-            "<span style='color:gray'>EHR Summary</span><br>"
-            "<span style='font-size:1.1em'>{msg}</span>"
-            "</div>"
-        )
-        _summary_unavailable = (
-            "<div style='min-height:120px'>"
-            "<span style='color:gray'>EHR Summary</span><br>"
-            "<span style='font-size:1.1em;color:gray'>Summary not available.</span></div>"
-        )
-
         @st.fragment(run_every=timedelta(milliseconds=500))
         def _summary_fragment():
             gen: SummaryGenerator | None = st.session_state.get("_summarizer")
-            if gen is not None and (gen.text or gen.status):
-                msg = gen.text or gen.status
-                st.markdown(_summary_box.format(msg=msg), unsafe_allow_html=True)
-            elif not backend.has_llm_model:
-                st.markdown(_summary_unavailable, unsafe_allow_html=True)
-            else:
-                st.markdown(_summary_box.format(msg=""), unsafe_allow_html=True)
+            msg = (gen.text or gen.status) if gen else None
+            render_summary(msg, available=backend.has_llm_model)
 
         with st.container(key="ehr_summary_slot"):
             _summary_fragment()
@@ -468,6 +366,17 @@ if dataset_name and scenario:
             estimator: OutcomeEstimator | None = st.session_state.get("_estimator")
             estimating = estimator is not None and estimator.running
             has_model = backend.has_ethos_model
+            has_trajectories = (
+                estimator is not None and not estimating and len(estimator.trajectories) > 0
+            )
+
+            # ── Pre-render: handle dropdown change before any widgets ──
+            _sel_idx = st.session_state.get("sel_outcome", 0)
+            _selected = sc.outcomes[_sel_idx]
+            _prev = st.session_state.get("_prev_outcome")
+            if has_trajectories and _prev != _selected.name:
+                st.session_state["_prev_outcome"] = _selected.name
+                _trigger_explanation(_selected, estimator, backend, ctx)
 
             # Detect any running explainer
             running_expl: TrajectoryExplainer | None = None
@@ -481,9 +390,6 @@ if dataset_name and scenario:
             prog = estimator.progress if estimator else None
             stop_clicked = False
             probs = estimator.probabilities if estimator else {}
-            has_trajectories = (
-                estimator is not None and not estimating and len(estimator.trajectories) > 0
-            )
 
             dropdown_col, btn_col, expl_status_col = st.columns([1.5, 1.3, 2.2])
 
@@ -518,19 +424,7 @@ if dataset_name and scenario:
                         disabled=not has_model or running_expl is not None,
                         use_container_width=True,
                     )
-                _fill = (
-                    f"background-image:linear-gradient(to right,"
-                    f"rgba(255,255,255,0.10) {pct}%,"
-                    f"transparent {pct}%)!important;"
-                    if pct
-                    else ""
-                )
-                st.markdown(
-                    f"<style>.st-key-est_btn button{{"
-                    f"background-color:rgba(255,255,255,0.06)!important;"
-                    f"{_fill}}}</style>",
-                    unsafe_allow_html=True,
-                )
+                render_estimate_button_fill(pct)
 
             with expl_status_col:
                 if running_expl is not None:
@@ -539,12 +433,7 @@ if dataset_name and scenario:
                         status_text = running_expl.status or ""
                         scol, xcol = st.columns([5, 1])
                         with scol:
-                            st.markdown(
-                                f"<div style='padding-top:8px'>"
-                                f"<span style='color:gray;font-size:0.85em'>"
-                                f"\U0001f4a1 {status_text}</span></div>",
-                                unsafe_allow_html=True,
-                            )
+                            render_explainer_status(status_text)
                         with xcol, st.container(key="stop_expl_btn"):
                             stop_clicked = st.button("\u2715", key="stop_expl_action")
 
@@ -552,28 +441,18 @@ if dataset_name and scenario:
             refresh_clicked = False
             _pad_l, card_col, _pad_r = st.columns([1.5, 2, 1.5])
             with card_col, st.container(key=f"card_{selected_rule.name}"):
-                card_html = (
-                    "<div class='outcome-card'>"
-                    f"<span style='font-size:5em'>{selected_rule.icon}</span><br>"
-                    f"<b style='font-size:1.3em'>{selected_rule.title}</b>"
-                )
                 entry = probs.get(selected_rule.name)
                 if entry is not None:
                     prob_val, k, n = entry
                     margin_val = wilson_margin(k, n)
-                    card_html += (
-                        f"<div style='font-size:2em'>"
-                        f"{prob_val:.0%}"
-                        f"<span style='display:inline-block;width:0;"
-                        f"overflow:visible;vertical-align:baseline'>"
-                        f"<span style='font-size:0.42em;color:gray;"
-                        f"margin-left:4px;white-space:nowrap'>"
-                        f"\u00b1{margin_val * 100:.1f}%</span></span></div>"
-                    )
                 else:
-                    card_html += "<div style='font-size:2em;color:gray'>???</div>"
-                card_html += "</div>"
-                st.markdown(card_html, unsafe_allow_html=True)
+                    prob_val, margin_val = None, None
+                render_outcome_card(
+                    selected_rule.icon,
+                    selected_rule.title,
+                    prob_val,
+                    margin_val,
+                )
 
                 sel_expl: TrajectoryExplainer | None = st.session_state.get(
                     f"_explainer_{selected_rule.name}"
@@ -588,18 +467,6 @@ if dataset_name and scenario:
                         )
 
             # ── Score Overview display ─────────────────────────
-            _expl_box = (
-                "<div style='min-height:100px;background:rgba(255,255,255,0.04);"
-                "border-radius:10px;padding:1em;margin-top:1em'>"
-                "<div style='font-size:1.25em;font-weight:600;"
-                "margin-bottom:0.3em'>Score Overview</div>"
-                "<div style='color:gray;font-size:0.95em;margin-bottom:0.6em'>"
-                "{icon} &ensp; {title}</div>"
-                "<div style='font-size:1.05em'>{msg}</div>"
-                "{footnote}"
-                "</div>"
-            )
-
             active_expl = st.session_state.get("_active_explanation")
             if active_expl:
                 active_expl_obj: TrajectoryExplainer | None = st.session_state.get(
@@ -619,21 +486,11 @@ if dataset_name and scenario:
                         if active_rule:
                             msg = active_expl_obj.text or active_expl_obj.status or ""
                             n_used = active_expl_obj.n_summarized
-                            footnote = ""
-                            if n_used > 0 and active_expl_obj.text:
-                                footnote = (
-                                    "<div style='color:gray;font-size:0.75em;"
-                                    f"margin-top:0.5em'>Based on {n_used} "
-                                    "ETHOS trajectories</div>"
-                                )
-                            st.markdown(
-                                _expl_box.format(
-                                    icon=active_rule.icon,
-                                    title=active_rule.title,
-                                    msg=msg,
-                                    footnote=footnote,
-                                ),
-                                unsafe_allow_html=True,
+                            render_score_overview(
+                                active_rule.icon,
+                                active_rule.title,
+                                msg,
+                                n_used if active_expl_obj.text else None,
                             )
 
             if estimating and prog:
@@ -654,7 +511,7 @@ if dataset_name and scenario:
                 st.session_state.pop("_prev_outcome", None)
 
                 new_est = OutcomeEstimator(
-                    dataset=ds,
+                    dataset=ctx.dataset,
                     sample_idx=selected_idx,
                     scenario=scenario,
                     model=backend.ethos_model,
@@ -662,7 +519,7 @@ if dataset_name and scenario:
                     temperature=st.session_state.get(
                         "ethos_temperature", DEFAULT_ETHOS_TEMPERATURE
                     ),
-                    allowed_token_ids=get_allowed_token_ids(dataset_name, ds_task),
+                    allowed_token_ids=get_allowed_token_ids(dataset_name, sc.dataset),
                 )
                 st.session_state["_estimator"] = new_est
                 new_est.start()
@@ -672,14 +529,6 @@ if dataset_name and scenario:
             if estimating and cancel_clicked:
                 estimator.cancel()
                 st.rerun(scope="fragment")
-
-            # ── Auto-trigger explanation on dropdown switch ───
-            if has_trajectories and not estimating:
-                _prev_outcome = st.session_state.get("_prev_outcome")
-                if _prev_outcome != selected_rule.name:
-                    st.session_state["_prev_outcome"] = selected_rule.name
-                    _trigger_explanation(selected_rule, estimator, backend)
-                    st.rerun(scope="fragment")
 
             # ── Handle refresh button ─────────────────────────
             if refresh_clicked:
@@ -693,7 +542,7 @@ if dataset_name and scenario:
                         sel_expl_obj.resume()
                     st.session_state["_active_explanation"] = selected_rule.name
                 else:
-                    _trigger_explanation(selected_rule, estimator, backend)
+                    _trigger_explanation(selected_rule, estimator, backend, ctx)
                 st.rerun(scope="fragment")
 
             # ── Handle stop (early finalize) ──────────────────
