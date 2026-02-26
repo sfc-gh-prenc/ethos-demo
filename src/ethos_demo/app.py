@@ -371,8 +371,13 @@ if dataset_name and scenario:
             )
 
             # ── Pre-render: handle dropdown change before any widgets ──
-            _sel_idx = st.session_state.get("sel_outcome", 0)
-            _selected = sc.outcomes[_sel_idx]
+            _outcome_map = {r.name: r for r in sc.outcomes}
+            _sel_name = st.session_state.get("sel_outcome", sc.outcomes[0].name)
+            if _sel_name not in _outcome_map:
+                _sel_name = sc.outcomes[0].name
+                st.session_state["sel_outcome"] = _sel_name
+            _selected = _outcome_map[_sel_name]
+
             _prev = st.session_state.get("_prev_outcome")
             if _prev != _selected.name:
                 st.session_state["_prev_outcome"] = _selected.name
@@ -401,17 +406,17 @@ if dataset_name and scenario:
             dropdown_col, btn_col, expl_status_col = st.columns([1.5, 1.3, 2.2])
 
             with dropdown_col:
-                outcome_labels = [f"{r.icon}  {r.title}" for r in sc.outcomes]
-                sel_idx = st.selectbox(
+                outcome_names = [r.name for r in sc.outcomes]
+                sel_name = st.selectbox(
                     "Outcome",
-                    options=range(len(sc.outcomes)),
-                    format_func=lambda i: outcome_labels[i],
+                    options=outcome_names,
+                    format_func=lambda n: f"{_outcome_map[n].icon}  {_outcome_map[n].title}",
                     key="sel_outcome",
                     label_visibility="collapsed",
                     disabled=running_expl is not None,
                 )
 
-            selected_rule = sc.outcomes[sel_idx]
+            selected_rule = _outcome_map[sel_name]
 
             with btn_col, st.container(key="est_btn"):
                 if estimating:
