@@ -374,9 +374,12 @@ if dataset_name and scenario:
             _sel_idx = st.session_state.get("sel_outcome", 0)
             _selected = sc.outcomes[_sel_idx]
             _prev = st.session_state.get("_prev_outcome")
-            if has_trajectories and _prev != _selected.name:
+            if _prev != _selected.name:
                 st.session_state["_prev_outcome"] = _selected.name
-                _trigger_explanation(_selected, estimator, backend, ctx)
+                if has_trajectories:
+                    _trigger_explanation(_selected, estimator, backend, ctx)
+                else:
+                    st.session_state["_active_explanation"] = _selected.name
 
             # Detect any running explainer
             running_expl: TrajectoryExplainer | None = None
@@ -440,7 +443,7 @@ if dataset_name and scenario:
             # ── Selected outcome card (aligned with button) ──
             refresh_clicked = False
             _pad_l, card_col, _pad_r = st.columns([1.5, 2, 1.5])
-            with card_col, st.container(key=f"card_{selected_rule.name}"):
+            with card_col, st.container(key="card_selected"):
                 entry = probs.get(selected_rule.name)
                 if entry is not None:
                     prob_val, k, n = entry
@@ -468,7 +471,7 @@ if dataset_name and scenario:
 
             # ── Score Overview display ─────────────────────────
             active_expl = st.session_state.get("_active_explanation")
-            if active_expl:
+            if active_expl and active_expl == selected_rule.name:
                 active_expl_obj: TrajectoryExplainer | None = st.session_state.get(
                     f"_explainer_{active_expl}"
                 )
@@ -479,19 +482,14 @@ if dataset_name and scenario:
                         and active_expl_obj.n_summarized > 0
                     )
                     if in_final_phase:
-                        active_rule = next(
-                            (r for r in sc.outcomes if r.name == active_expl),
-                            None,
+                        msg = active_expl_obj.text or active_expl_obj.status or ""
+                        n_used = active_expl_obj.n_summarized
+                        render_score_overview(
+                            selected_rule.icon,
+                            selected_rule.title,
+                            msg,
+                            n_used if active_expl_obj.text else None,
                         )
-                        if active_rule:
-                            msg = active_expl_obj.text or active_expl_obj.status or ""
-                            n_used = active_expl_obj.n_summarized
-                            render_score_overview(
-                                active_rule.icon,
-                                active_rule.title,
-                                msg,
-                                n_used if active_expl_obj.text else None,
-                            )
 
             if estimating and prog:
                 _logger.debug(
