@@ -180,6 +180,10 @@ def render_score_overview(
             f"margin-top:0.5em'>Based on {n_trajectories} "
             "ETHOS trajectories</div>"
         )
+    paragraphs = [p.strip() for p in msg.split("\n\n") if p.strip()] if msg else []
+    body = (
+        "".join(f"<p style='margin:0 0 0.75em'>{p}</p>" for p in paragraphs) if paragraphs else msg
+    )
     st.markdown(
         f"<div style='min-height:100px;background:rgba(255,255,255,0.04);"
         f"border-radius:10px;padding:1em;margin-top:1em'>"
@@ -187,7 +191,7 @@ def render_score_overview(
         f"margin-bottom:0.3em'>Score Overview</div>"
         f"<div style='color:gray;font-size:0.95em;margin-bottom:0.6em'>"
         f"{icon} &ensp; {title}</div>"
-        f"<div style='font-size:1.05em;white-space:pre-line'>{msg}</div>"
+        f"<div style='font-size:1.05em'>{body}</div>"
         f"{footnote}"
         f"</div>",
         unsafe_allow_html=True,

@@ -381,6 +381,10 @@ if dataset_name and scenario:
                 else:
                     st.session_state["_active_explanation"] = _selected.name
 
+            # Auto-trigger explanation when estimation just finished/cancelled
+            if has_trajectories and not st.session_state.get(f"_explainer_{_selected.name}"):
+                _trigger_explanation(_selected, estimator, backend, ctx)
+
             # Detect any running explainer
             running_expl: TrajectoryExplainer | None = None
             for _r in sc.outcomes:
