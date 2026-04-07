@@ -11,7 +11,9 @@ from .datasets import (
     get_sample_context_stats,
     get_sample_identity,
     get_sample_prompt,
+    get_token_ids_by_prefix,
     load_dataset,
+    resolve_stop_token_ids,
     sample_indices,
 )
 from .demographics import (
@@ -41,7 +43,9 @@ __all__ = [
     "get_sample_context_stats",
     "get_sample_identity",
     "get_sample_prompt",
+    "get_token_ids_by_prefix",
     "load_dataset",
     "load_quantiles",
+    "resolve_stop_token_ids",
     "sample_indices",
 ]

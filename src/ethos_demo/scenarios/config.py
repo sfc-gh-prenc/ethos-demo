@@ -29,6 +29,7 @@ class OutcomeRule:
     icon: str
     title: str
     positive_events: frozenset[str]
+    positive_predicate: Callable[[str], bool] | None = None
     time_window: timedelta | None = None
 
 
@@ -40,6 +41,9 @@ class ScenarioConfig:
     outcomes: tuple[OutcomeRule, ...]
     context: str
     history_fn: HistoryFn
+    discard_stop_tokens: tuple[str, ...] = ()
+    continuation_stop_prefix: str | None = None
+    continuation_max_tokens: int = 100
 
     @property
     def task_names(self) -> list[str]:
@@ -59,14 +63,14 @@ SCENARIOS: dict[Scenario, ScenarioConfig] = {
                 "\U0001f3e5",
                 "Hospitalization",
                 frozenset({SpecialToken.ADMISSION}),
-                timedelta(hours=36),
+                time_window=timedelta(hours=36),
             ),
             OutcomeRule(
                 "ed_critical_outcome",
                 "\U0001f6cf\ufe0f",
                 "12h Critical Event",
                 frozenset({SpecialToken.ICU_ADMISSION, SpecialToken.DEATH}),
-                timedelta(hours=12),
+                time_window=timedelta(hours=12),
             ),
         ),
         context=(
@@ -94,6 +98,16 @@ SCENARIOS: dict[Scenario, ScenarioConfig] = {
                 "Mortality",
                 frozenset({SpecialToken.DEATH}),
             ),
+            OutcomeRule(
+                "sepsis",
+                "\U0001f9a0",
+                "Sepsis",
+                frozenset(),
+                positive_predicate=lambda t: (
+                    t.startswith("ICD_CM//PFX")
+                    and any(t.endswith(s) for s in ("A40", "A41", "R65"))
+                ),
+            ),
         ),
         context=(
             "The patient is being admitted to the hospital. The admitting team is reviewing "
@@ -101,6 +115,9 @@ SCENARIOS: dict[Scenario, ScenarioConfig] = {
             "The present timeline covers the last 36 hours before admission."
         ),
         history_fn=get_last_36h_history,
+        discard_stop_tokens=(SpecialToken.TIMELINE_END,),
+        continuation_stop_prefix="DRG//",
+        continuation_max_tokens=100,
     ),
     Scenario.HOSPITAL_DISCHARGE: ScenarioConfig(
         description="Patient is discharged from hospital",
@@ -112,14 +129,14 @@ SCENARIOS: dict[Scenario, ScenarioConfig] = {
                 "\U0001f3e5",
                 "30-Day Readmission",
                 frozenset({SpecialToken.ADMISSION, SpecialToken.DEATH}),
-                timedelta(days=30),
+                time_window=timedelta(days=30),
             ),
             OutcomeRule(
                 "readmission_90d",
                 "\U0001f3e5",
                 "90-Day Readmission",
                 frozenset({SpecialToken.ADMISSION, SpecialToken.DEATH}),
-                timedelta(days=90),
+                time_window=timedelta(days=90),
             ),
         ),
         context=(

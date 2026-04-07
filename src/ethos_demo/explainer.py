@@ -43,30 +43,34 @@ def _extract_relevant_tokens(tokens: list[str], rule: OutcomeRule, is_positive: 
     if not is_positive:
         return tokens
     for i, tok in enumerate(tokens):
-        if tok in rule.positive_events:
+        if tok in rule.positive_events or (
+            rule.positive_predicate is not None and rule.positive_predicate(tok)
+        ):
             group_size = _TOKEN_GROUP_SIZES.get(tok, 1)
             return tokens[: i + group_size]
     return tokens
 
 
 def _probability_guidance(probability: float, outcome_title: str) -> str:
-    pct = probability * 100
-    if 40 <= pct <= 60:
+    if not (0 <= probability <= 1):
+        raise ValueError(f"Invalid probability: {probability}")
+
+    if 40 <= probability <= 60:
         return (
             "The probability is in an uncertain range (40-60%). Provide a balanced "
             f"discussion — what clinical factors could lead to {outcome_title} and "
             "what factors suggest it will not occur. Reference patterns from both "
             "types of scenarios equally."
         )
-    if pct > 60:
+    if probability > 60:
         return (
-            f"The probability is elevated ({pct:.0f}%). Emphasize what clinical "
+            f"The probability is elevated ({probability:.0f}%). Emphasize what clinical "
             f"factors in scenarios where {outcome_title} occurs drive this risk — "
             "what events, lab trends, or complications are involved. Also note what "
             "distinguishes scenarios where the outcome is avoided."
         )
     return (
-        f"The probability is low ({pct:.0f}%). Emphasize what clinical factors "
+        f"The probability is low ({probability:.0f}%). Emphasize what clinical factors "
         f"in scenarios where {outcome_title} does not occur make it unlikely — "
         "what indicates a stable or recovering course. Also note what risk factors "
         "in the minority of scenarios could still lead to the outcome."

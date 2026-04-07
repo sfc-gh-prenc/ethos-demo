@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections import Counter
 from datetime import timedelta
 from typing import TYPE_CHECKING
@@ -16,6 +17,8 @@ from ..config import TOKENIZED_DATASETS_DIR
 
 if TYPE_CHECKING:
     from ..scenarios import HistorySplit, Scenario
+
+_logger = logging.getLogger(__name__)
 
 
 @st.cache_resource
@@ -216,3 +219,30 @@ def get_sample_context(
 ) -> SampleContext:
     """Return a cached `SampleContext` for the given dataset+task combination."""
     return SampleContext(dataset_name, task, n_samples, seed)
+
+
+def resolve_stop_token_ids(
+    dataset: InferenceDataset,
+    stop_tokens: tuple[str, ...],
+) -> list[int]:
+    """Resolve stop token strings to token IDs via the dataset vocabulary."""
+    ids = dataset.vocab.encode(list(stop_tokens))
+    resolved: list[int] = []
+    for tok, tid in zip(stop_tokens, ids, strict=False):
+        if tid is None:
+            _logger.error("Stop token %r not found in vocabulary — skipped", tok)
+        else:
+            resolved.append(tid)
+    return resolved
+
+
+def get_token_ids_by_prefix(
+    dataset: InferenceDataset,
+    prefix: str,
+) -> list[int]:
+    """Return token IDs for all vocabulary entries starting with *prefix*."""
+    return [
+        i
+        for i, tok in enumerate(dataset.vocab.decode(range(len(dataset.vocab))))
+        if tok is not None and tok.startswith(prefix)
+    ]

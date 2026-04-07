@@ -17,7 +17,7 @@ from .config import (
     N_COMPLETIONS,
     N_PER_REQUEST,
 )
-from .data import get_sample_prompt
+from .data import get_sample_prompt, get_token_ids_by_prefix, resolve_stop_token_ids
 from .scenarios import SCENARIOS, OutcomeRule, Scenario
 
 logger = logging.getLogger(__name__)
@@ -100,9 +100,10 @@ class StreamTracker:
         for rule in self.rules:
             if self._outcomes[rule.name] is not None:
                 continue
-            if token in rule.positive_events and (
-                rule.time_window is None or self.accumulated_time <= rule.time_window
-            ):
+            if (
+                token in rule.positive_events
+                or (rule.positive_predicate is not None and rule.positive_predicate(token))
+            ) and (rule.time_window is None or self.accumulated_time <= rule.time_window):
                 self._outcomes[rule.name] = True
 
         for rule in self.rules:
@@ -195,10 +196,18 @@ class OutcomeEstimator:
         self._rules = sc.outcomes
         self._outcome_names = [r.name for r in self._rules]
         self._max_time = self._derive_max_time()
-        self._stop_tokens = list(sc.stop_tokens)
+        self._stop_token_ids = resolve_stop_token_ids(dataset, sc.stop_tokens)
+        self._discard_tokens: frozenset[str] = frozenset(sc.discard_stop_tokens)
         self._interval_estimates: dict[str, float] = dataset.vocab.interval_estimates.get(
             "mean", {}
         )
+
+        self._continuation_stop_token_ids: list[int] | None = None
+        self._continuation_max_tokens = sc.continuation_max_tokens
+        if sc.continuation_stop_prefix:
+            self._continuation_stop_token_ids = get_token_ids_by_prefix(
+                dataset, sc.continuation_stop_prefix
+            )
 
         self._prompt: str | None = None
         self._n_input_tokens: int | None = None
@@ -287,31 +296,67 @@ class OutcomeEstimator:
 
     async def _request_batch(
         self, n: int, sem: asyncio.Semaphore
-    ) -> list[tuple[str, StreamTracker]]:
+    ) -> tuple[int, list[tuple[str, StreamTracker]]]:
+        """Return *(n_generated, valid_results)*.
+
+        *n_generated* includes discarded runs so the progress counter stays accurate.
+        """
         async with sem:
             if self._is_cancelled():
-                return []
+                return (0, [])
 
             pairs = await self._client.send_async(
                 self._prompt,
                 n_input_tokens=self._n_input_tokens,
                 n=n,
-                stop=self._stop_tokens,
+                stop_token_ids=self._stop_token_ids,
                 temperature=self.temperature,
                 allowed_token_ids=self._allowed_token_ids,
             )
 
+        n_generated = len(pairs)
+
+        valid_pairs: list[tuple[str, str]] = []
+        for text, finish in pairs:
+            tokens = text.split()
+            last_tok = tokens[-1] if tokens else ""
+            if last_tok in self._discard_tokens:
+                continue
+            valid_pairs.append((text, finish))
+
+        cont_results: list[list[tuple[str, str]] | BaseException | None] = [None] * len(valid_pairs)
+        if self._continuation_stop_token_ids and valid_pairs:
+            async with sem:
+                cont_tasks = [
+                    self._client.send_async(
+                        self._prompt + " " + text,
+                        n_input_tokens=self._n_input_tokens + len(text.split()),
+                        n=1,
+                        stop_token_ids=self._continuation_stop_token_ids,
+                        max_tokens=self._continuation_max_tokens,
+                        temperature=self.temperature,
+                    )
+                    for text, _ in valid_pairs
+                ]
+                cont_results = await asyncio.gather(*cont_tasks, return_exceptions=True)
+
         results: list[tuple[str, StreamTracker]] = []
-        for text, _finish in pairs:
+        for (text, _finish), cont in zip(valid_pairs, cont_results, strict=False):
             t = StreamTracker(
                 rules=self._rules,
                 interval_estimates=self._interval_estimates,
                 max_time=self._max_time,
             )
             t.process_chunk(text)
+            cont_text = ""
+            if cont and not isinstance(cont, BaseException):
+                cont_text = cont[0][0]
+                if cont_text:
+                    t.process_chunk(" " + cont_text)
             t.flush()
-            results.append((text, t))
-        return results
+            full_text = (text + " " + cont_text) if cont_text else text
+            results.append((full_text, t))
+        return (n_generated, results)
 
     async def _run(self) -> None:
         self._prompt, self._n_input_tokens = get_sample_prompt(self.dataset, self.sample_idx)
@@ -343,13 +388,13 @@ class OutcomeEstimator:
             )
             for future in done:
                 try:
-                    batch = future.result()
+                    n_generated, batch = future.result()
                 except Exception:
                     logger.debug("Request failed", exc_info=True)
                     self._completed += self.n_per_request
                     continue
 
-                self._completed += len(batch) if batch else self.n_per_request
+                self._completed += n_generated if n_generated else self.n_per_request
                 for text, tracker in batch:
                     self._trajectories.append((text.split(), tracker.outcomes))
                     for name, positive in tracker.outcomes.items():

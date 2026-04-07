@@ -40,22 +40,25 @@ class CompletionClient:
         *,
         n_input_tokens: int,
         n: int = 1,
-        stop: list[str] | None = None,
-        temperature: float = 0.2,
-        top_p: float = 0.9,
+        stop_token_ids: list[int] | None = None,
+        max_tokens: int | None = None,
+        temperature: float,
         **kwargs,
     ) -> list[tuple[str, str]]:
         """Send a completion request and return (text, finish_reason) per choice."""
-        max_tokens = self.max_model_len - n_input_tokens
+        _max_tokens = (
+            max_tokens if max_tokens is not None else (self.max_model_len - n_input_tokens)
+        )
+        extra_body: dict = {"include_stop_str_in_output": True}
+        if stop_token_ids is not None:
+            extra_body["stop_token_ids"] = stop_token_ids
         response = self._client.completions.create(
             model=self.model,
             prompt=prompt,
             n=n,
-            stop=stop,
-            max_tokens=max_tokens,
+            max_tokens=_max_tokens,
             temperature=temperature,
-            top_p=top_p,
-            extra_body={"include_stop_str_in_output": True},
+            extra_body=extra_body,
             **kwargs,
         )
         return [(c.text, c.finish_reason) for c in response.choices]
@@ -66,25 +69,27 @@ class CompletionClient:
         *,
         n_input_tokens: int,
         n: int = 1,
-        stop: list[str] | None = None,
+        stop_token_ids: list[int] | None = None,
+        max_tokens: int | None = None,
         allowed_token_ids: list[int] | None = None,
-        temperature: float = 0.2,
-        top_p: float = 0.9,
+        temperature: float,
         **kwargs,
     ) -> list[tuple[str, str]]:
         """Async completion request - return (text, finish_reason) per choice."""
-        max_tokens = self.max_model_len - n_input_tokens
+        _max_tokens = (
+            max_tokens if max_tokens is not None else (self.max_model_len - n_input_tokens)
+        )
         extra_body: dict = {"include_stop_str_in_output": True}
         if allowed_token_ids is not None:
             extra_body["allowed_token_ids"] = allowed_token_ids
+        if stop_token_ids is not None:
+            extra_body["stop_token_ids"] = stop_token_ids
         response = await self._async_client.completions.create(
             model=self.model,
             prompt=prompt,
             n=n,
-            stop=stop,
-            max_tokens=max_tokens,
+            max_tokens=_max_tokens,
             temperature=temperature,
-            top_p=top_p,
             extra_body=extra_body,
             **kwargs,
         )
@@ -95,22 +100,25 @@ class CompletionClient:
         prompt: str,
         *,
         n_input_tokens: int,
-        stop: list[str] | None = None,
-        temperature: float = 0.2,
-        top_p: float = 0.9,
+        stop_token_ids: list[int] | None = None,
+        max_tokens: int | None = None,
+        temperature: float,
         **kwargs,
     ) -> AsyncIterator[str]:
         """Stream a text completion, yielding text deltas as they arrive."""
-        max_tokens = self.max_model_len - n_input_tokens
+        _max_tokens = (
+            max_tokens if max_tokens is not None else (self.max_model_len - n_input_tokens)
+        )
+        extra_body: dict = {"include_stop_str_in_output": True}
+        if stop_token_ids is not None:
+            extra_body["stop_token_ids"] = stop_token_ids
         stream = await self._async_client.completions.create(
             model=self.model,
             prompt=prompt,
             stream=True,
-            max_tokens=max_tokens,
-            stop=stop,
+            max_tokens=_max_tokens,
             temperature=temperature,
-            top_p=top_p,
-            extra_body={"include_stop_str_in_output": True},
+            extra_body=extra_body,
             **kwargs,
         )
         try:
