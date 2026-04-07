@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import statistics
 import threading
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -197,6 +198,7 @@ class OutcomeEstimator:
         self._outcome_names = [r.name for r in self._rules]
         self._max_time = self._derive_max_time()
         self._stop_token_ids = resolve_stop_token_ids(dataset, sc.stop_tokens)
+        self._stop_token_strings: frozenset[str] = frozenset(sc.stop_tokens)
         self._discard_tokens: frozenset[str] = frozenset(sc.discard_stop_tokens)
         self._interval_estimates: dict[str, float] = dataset.vocab.interval_estimates.get(
             "mean", {}
@@ -217,6 +219,7 @@ class OutcomeEstimator:
         self._completed = 0
         self._discarded = 0
         self._stop_counts: dict[str, int] = {}
+        self._trajectory_days: list[float] = []
         self._cancel_event = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -250,10 +253,21 @@ class OutcomeEstimator:
 
     @property
     def log_summary(self) -> dict:
+        days = self._trajectory_days
+        if days:
+            time_stats = {
+                "min": f"{min(days):.1f}d",
+                "median": f"{statistics.median(days):.1f}d",
+                "mean": f"{statistics.mean(days):.1f}d",
+                "max": f"{max(days):.1f}d",
+            }
+        else:
+            time_stats = {}
         return {
             "prog": f"{self._completed}/{self.n_completions}",
             "discarded": self._discarded,
             "stop_tokens": dict(self._stop_counts),
+            "gen_time": time_stats,
             "tasks": {
                 name: {
                     "valid": agg.valid,
@@ -324,7 +338,8 @@ class OutcomeEstimator:
         for text, finish in pairs:
             tokens = text.split()
             last_tok = tokens[-1] if tokens else ""
-            stop_counts[last_tok] = stop_counts.get(last_tok, 0) + 1
+            bucket = last_tok if last_tok in self._stop_token_strings else "max_tokens"
+            stop_counts[bucket] = stop_counts.get(bucket, 0) + 1
             if last_tok in self._discard_tokens:
                 n_discarded += 1
                 continue
@@ -406,6 +421,7 @@ class OutcomeEstimator:
                     self._stop_counts[tok] = self._stop_counts.get(tok, 0) + cnt
                 for text, tracker in batch:
                     self._trajectories.append((text.split(), tracker.outcomes))
+                    self._trajectory_days.append(tracker.accumulated_time.total_seconds() / 86400)
                     for name, positive in tracker.outcomes.items():
                         agg = self._results[name]
                         agg.valid += 1
