@@ -9,10 +9,10 @@ from ethos_demo.backend import BackendEvent, BackendMonitor
 from ethos_demo.config import (
     DEFAULT_BASE_URL,
     DEFAULT_ETHOS_TEMPERATURE,
+    DEFAULT_SAMPLE_SEED,
     HEALTH_RETRY_SECONDS,
     N_EXPLANATION_TRAJECTORIES,
     N_SAMPLES,
-    SAMPLE_SEED,
     TOKENIZED_DATASETS_DIR,
 )
 from ethos_demo.data import (
@@ -95,7 +95,7 @@ with st.sidebar:
         event = backend.poll()
         render_status_indicator(backend.healthy)
         if event != BackendEvent.UNCHANGED:
-            st.rerun()
+            st.rerun(scope="app")
 
     with st.container(key="sidebar_bottom"):
         _ai_working_fragment()
@@ -153,6 +153,13 @@ with st.sidebar:
         key="ethos_temperature",
     )
     _model_select("LLM Provider", "llm_model_id", backend.llm_models)
+    st.number_input(
+        "Seed",
+        min_value=0,
+        value=DEFAULT_SAMPLE_SEED,
+        step=1,
+        key="sample_seed",
+    )
 
 
 def _start_summary(
@@ -248,6 +255,7 @@ def _trigger_explanation(rule: OutcomeRule, estimator, backend, ctx) -> None:
         scenario=estimator.scenario,
         dataset_name=st.session_state["sel_ds"],
         model=backend.llm_model,
+        seed=st.session_state.get("sample_seed", DEFAULT_SAMPLE_SEED),
     )
     st.session_state[expl_key] = explainer
     explainer.start()
@@ -290,8 +298,9 @@ selected_label = None
 if dataset_name and scenario:
     sc = SCENARIOS[scenario]
 
+    seed = st.session_state.get("sample_seed", DEFAULT_SAMPLE_SEED)
     with st.spinner("Loading dataset…"):
-        ctx = get_sample_context(dataset_name, sc.dataset, N_SAMPLES, SAMPLE_SEED)
+        ctx = get_sample_context(dataset_name, sc.dataset, N_SAMPLES, seed)
 
     with col_pt:
         selected_label = st.selectbox("Cases", options=list(ctx.label_to_idx), key="sel_pt")

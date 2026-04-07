@@ -27,6 +27,7 @@ from .data import (
     get_patient_demographics,
 )
 from .scenarios import SCENARIOS, Scenario, get_timeline_times_us
+from .utils import token_dict_mapping
 
 _logger = logging.getLogger(__name__)
 
@@ -217,10 +218,16 @@ class SummaryGenerator:
             len(past_dicts),
             len(present_dicts),
         )
-        _logger.debug("Present encounter dicts (%s): %s", self.scenario, present_dicts[-100:])
-        _logger.debug(
-            "Current encounter tokens (%s): %s", self.scenario, split.present_tokens[-100:]
-        )
+        for label, dicts, tokens in (
+            ("past", past_dicts, split.past_tokens),
+            ("present", present_dicts, split.present_tokens),
+        ):
+            _logger.debug(
+                "Token→dict %s (%s, last 100 events): %s",
+                label,
+                self.scenario,
+                token_dict_mapping(tokens, dicts),
+            )
 
         # ── 2. Stage 1: Summarize past history ─────────────────
         if past_dicts:

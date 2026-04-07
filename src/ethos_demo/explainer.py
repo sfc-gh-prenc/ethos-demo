@@ -112,6 +112,7 @@ class TrajectoryExplainer:
         dataset_name: str,
         model: str,
         base_url: str = DEFAULT_BASE_URL,
+        seed: int = 1,
     ) -> None:
         """Create an explainer for a single outcome rule.
 
@@ -127,6 +128,7 @@ class TrajectoryExplainer:
             dataset_name: Dataset directory name, used for quantile look-ups.
             model: Chat LLM model ID.
             base_url: OpenAI-compatible API endpoint.
+            seed: RNG seed for trajectory sampling.
         """
         self._rule = outcome_rule
         self._probability = probability
@@ -137,6 +139,7 @@ class TrajectoryExplainer:
         self._demographics = demographics_context
         self._scenario = scenario
         self._dataset_name = dataset_name
+        self._seed = seed
         self._chat = ChatClient(model=model, base_url=base_url)
 
         self._cancel_event = threading.Event()
@@ -267,7 +270,7 @@ class TrajectoryExplainer:
         # ── 1. Sample and split (first run only) ─────────────────
         if self._sampled is None:
             n_sample = min(N_EXPLANATION_TRAJECTORIES, len(self._trajectories))
-            rng = np.random.default_rng()
+            rng = np.random.default_rng(self._seed)
             indices = rng.choice(len(self._trajectories), size=n_sample, replace=False)
 
             self._sampled = []

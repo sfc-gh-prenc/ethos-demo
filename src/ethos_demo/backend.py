@@ -106,19 +106,14 @@ class BackendMonitor:
         The fragment fires every HEALTH_RETRY_SECONDS, but when healthy we throttle to only check
         every HEALTH_POLL_SECONDS.
 
-        On the very first call (health state unknown) we assume disconnected
-        and return immediately so the UI can render without blocking on the
-        network request.  The fragment's periodic ``run_every`` timer will
-        perform the real check moments later.
+        On the very first call (health state unknown) we treat the previous state as disconnected
+        and fall through to the real health check so models are available immediately when the
+        backend is up.
         """
         was_healthy = st.session_state.get(self._KEY_HEALTHY, None)
 
-        # First render: assume disconnected and let the periodic timer do the
-        # real check so the UI is never blocked on a slow/missing backend.
         if was_healthy is None:
-            st.session_state[self._KEY_HEALTHY] = False
-            self._on_connection_lost()
-            return BackendEvent.UNCHANGED
+            was_healthy = False
 
         if self.busy:
             return BackendEvent.UNCHANGED
