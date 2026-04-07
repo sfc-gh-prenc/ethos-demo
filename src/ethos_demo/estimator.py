@@ -215,6 +215,8 @@ class OutcomeEstimator:
         self._results: dict[str, _AggResult] = {name: _AggResult() for name in self._outcome_names}
         self._trajectories: list[tuple[list[str], dict[str, bool]]] = []
         self._completed = 0
+        self._discarded = 0
+        self._stop_counts: dict[str, int] = {}
         self._cancel_event = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -248,15 +250,18 @@ class OutcomeEstimator:
 
     @property
     def log_summary(self) -> dict:
-        done = self._completed
         return {
-            name: {
-                "processed": done,
-                "valid": agg.valid,
-                "yield": f"{100 * agg.valid / done:.1f}%" if done else "n/a",
-                "prob": f"{agg.probability:.1%}" if agg.probability is not None else "n/a",
-            }
-            for name, agg in self._results.items()
+            "prog": f"{self._completed}/{self.n_completions}",
+            "discarded": self._discarded,
+            "stop_tokens": dict(self._stop_counts),
+            "tasks": {
+                name: {
+                    "valid": agg.valid,
+                    "pos": agg.positives,
+                    "prob": f"{agg.probability:.1%}" if agg.probability is not None else "n/a",
+                }
+                for name, agg in self._results.items()
+            },
         }
 
     # ── lifecycle ──────────────────────────────────────────────────
@@ -296,14 +301,11 @@ class OutcomeEstimator:
 
     async def _request_batch(
         self, n: int, sem: asyncio.Semaphore
-    ) -> tuple[int, list[tuple[str, StreamTracker]]]:
-        """Return *(n_generated, valid_results)*.
-
-        *n_generated* includes discarded runs so the progress counter stays accurate.
-        """
+    ) -> tuple[int, int, dict[str, int], list[tuple[str, StreamTracker]]]:
+        """Return *(n_generated, n_discarded, stop_counts, valid_results)*."""
         async with sem:
             if self._is_cancelled():
-                return (0, [])
+                return (0, 0, {}, [])
 
             pairs = await self._client.send_async(
                 self._prompt,
@@ -315,12 +317,16 @@ class OutcomeEstimator:
             )
 
         n_generated = len(pairs)
+        n_discarded = 0
+        stop_counts: dict[str, int] = {}
 
         valid_pairs: list[tuple[str, str]] = []
         for text, finish in pairs:
             tokens = text.split()
             last_tok = tokens[-1] if tokens else ""
+            stop_counts[last_tok] = stop_counts.get(last_tok, 0) + 1
             if last_tok in self._discard_tokens:
+                n_discarded += 1
                 continue
             valid_pairs.append((text, finish))
 
@@ -356,7 +362,7 @@ class OutcomeEstimator:
             t.flush()
             full_text = (text + " " + cont_text) if cont_text else text
             results.append((full_text, t))
-        return (n_generated, results)
+        return (n_generated, n_discarded, stop_counts, results)
 
     async def _run(self) -> None:
         self._prompt, self._n_input_tokens = get_sample_prompt(self.dataset, self.sample_idx)
@@ -388,13 +394,16 @@ class OutcomeEstimator:
             )
             for future in done:
                 try:
-                    n_generated, batch = future.result()
+                    n_generated, n_discarded, stop_counts, batch = future.result()
                 except Exception:
                     logger.debug("Request failed", exc_info=True)
                     self._completed += self.n_per_request
                     continue
 
                 self._completed += n_generated if n_generated else self.n_per_request
+                self._discarded += n_discarded
+                for tok, cnt in stop_counts.items():
+                    self._stop_counts[tok] = self._stop_counts.get(tok, 0) + cnt
                 for text, tracker in batch:
                     self._trajectories.append((text.split(), tracker.outcomes))
                     for name, positive in tracker.outcomes.items():

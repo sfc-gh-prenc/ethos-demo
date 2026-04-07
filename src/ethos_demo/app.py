@@ -511,9 +511,7 @@ if dataset_name and scenario:
 
             if estimating and prog:
                 _logger.debug(
-                    "estimation %d/%d \u2014 %s",
-                    prog[0],
-                    prog[1],
+                    "estimation %s",
                     estimator.log_summary,
                 )
 
